@@ -17,20 +17,47 @@ export class ChannelsService {
     private readonly events: DomainEvents,
   ) {}
 
+  /**
+   * Derives a slug from a channel name.
+   *
+   * Arabic-first product, latin-restricted URLs: a name written entirely in Arabic (the common
+   * case here) has no latin characters to derive from, so we fall back to a short random slug
+   * instead of failing the creation with `slug_invalid`. Callers that want a specific URL pass
+   * `slug` explicitly and then get a clear `slug_taken` error instead of a silent rename.
+   */
   private slugify(name: string): string {
     const base = name
       .toLowerCase()
       .replace(/[^a-z0-9_]+/g, '_')
       .replace(/^_+|_+$/g, '')
       .slice(0, 30);
-    return /^[a-z]/.test(base) ? base : `c_${base.replace(/^[^a-z]+/, '')}`.slice(0, 39);
+    const latinOnly = base.replace(/^[^a-z]+/, '');
+    if (/^[a-z]/.test(base) && latinOnly.length >= 2) return base;
+    if (latinOnly.length >= 2) return `c_${latinOnly}`.slice(0, 39);
+    return `c_${randomToken(6).replace(/[^a-z0-9]/gi, '').slice(0, 8).toLowerCase()}`;
+  }
+
+  /** Keeps auto-generated slugs unique when two channels share a name. */
+  private withSuffix(slug: string): string {
+    const suffix = randomToken(6).replace(/[^a-z0-9]/gi, '').slice(0, 6).toLowerCase();
+    return `${slug.slice(0, 30).replace(/[^a-z0-9_]+$/g, '')}_${suffix}`.slice(0, 39);
   }
 
   async create(userId: string, input: { name: string; slug?: string; description?: string; visibility: 'public' | 'private' }, ctx: RequestContext) {
-    const slug = input.slug ?? this.slugify(input.name);
+    let slug = input.slug ?? this.slugify(input.name);
     assert(/^[a-z][a-z0-9_]{2,39}$/.test(slug), 'validation_error', 'slug_invalid');
-    const existing = await this.deps.repos.channels.findBySlug(slug);
-    if (existing) throw new AppError('slug_taken');
+    if (input.slug) {
+      const existing = await this.deps.repos.channels.findBySlug(slug);
+      if (existing) throw new AppError('slug_taken');
+    } else {
+      // A user-chosen URL must never be silently rewritten; an auto-derived one may be retried.
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        const existing = await this.deps.repos.channels.findBySlug(slug);
+        if (!existing) break;
+        slug = this.withSuffix(slug);
+      }
+      assert(/^[a-z][a-z0-9_]{2,39}$/.test(slug), 'validation_error', 'slug_invalid');
+    }
     const channel = await this.deps.repos.channels.create({
       ownerId: userId,
       name: input.name,
@@ -247,6 +274,22 @@ export class ChannelsService {
       items: items.map((item, index) => channelPostToDto(item, media[index] ?? [])),
       nextCursor,
     };
+  }
+
+  /**
+   * Channel-scoped audit trail (requirement: reviewable moderation). Owners and admins can
+   * see exactly what was done in their channel — promotions, deletions, invites — without
+   * gaining the platform-wide staff log.
+   */
+  async auditLog(channelId: string, userId: string, options: { limit: number; offset: number }) {
+    await this.requireChannelRole(channelId, userId, ['owner', 'admin']);
+    const entries = await this.deps.repos.audit.list({
+      targetType: 'channel',
+      targetId: channelId,
+      limit: options.limit,
+      offset: options.offset,
+    });
+    return { items: entries, channelId };
   }
 
   async pinPost(channelId: string, postId: string, userId: string, pinned: boolean) {

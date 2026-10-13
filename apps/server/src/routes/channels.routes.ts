@@ -89,6 +89,15 @@ export async function registerChannelRoutes(app: FastifyInstance, container: Ser
     return channels.setMemberRole(channelId, request.auth!.userId, userId, body.role, ctxOf(request));
   });
 
+  app.get('/channels/:channelId/audit', { preHandler: [app.authenticate], schema: { tags: ['channels'] } }, async (request) => {
+    const { channelId } = request.params as { channelId: string };
+    const query = request.query as Record<string, string | undefined>;
+    return channels.auditLog(channelId, request.auth!.userId, {
+      limit: Math.min(Number(query.limit ?? 50) || 50, 200),
+      offset: Math.max(Number(query.offset ?? 0) || 0, 0),
+    });
+  });
+
   app.get('/channels/:channelId/posts', { preHandler: [app.optionalAuth], schema: { tags: ['channels'] } }, async (request) => {
     const { channelId } = request.params as { channelId: string };
     const query = request.query as Record<string, string | undefined>;

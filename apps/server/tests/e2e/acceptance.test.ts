@@ -762,4 +762,106 @@ describe('acceptance criteria', () => {
     expect(revoked.status).toBe(200);
     expect(revoked.body.revokedSessions).toBeGreaterThanOrEqual(10);
   });
+  it('21. channel admins can promote, post, pin and be constrained by their role', async () => {
+    const base = e2e().baseUrl;
+    const owner = new ApiClient(base);
+    const helper = new ApiClient(base);
+    const outsider = new ApiClient(base);
+    await owner.register({ username: uniqueUsername('chowner') });
+    await helper.register({ username: uniqueUsername('chhelper') });
+    await outsider.register({ username: uniqueUsername('chguest') });
+
+    // Arabic-only channel name, no explicit slug: the server must derive a usable latin URL
+    // (Arabic-first product) instead of failing with `slug_invalid`.
+    const created = await owner.request<{ channel: { id: string; slug: string; myRole: string } }>('POST', '/api/channels', {
+      body: { name: 'قناة التثبيت والأدوار', visibility: 'public', description: 'cover pin + roles' },
+    });
+    expect(created.status).toBe(201);
+    const channelId = created.body.channel.id;
+    expect(created.body.channel.myRole).toBe('owner');
+    expect(created.body.channel.slug).toMatch(/^[a-z][a-z0-9_]{2,39}$/);
+
+    // A second channel with the same Arabic name gets its own slug rather than a collision error.
+    const twin = await owner.request<{ channel: { id: string; slug: string } }>('POST', '/api/channels', {
+      body: { name: 'قناة التثبيت والأدوار', visibility: 'public' },
+    });
+    expect(twin.status).toBe(201);
+    expect(twin.body.channel.slug).not.toBe(created.body.channel.slug);
+
+    // A subscriber cannot post, promote or pin: role checks are real, not cosmetic.
+    const subscribed = await helper.request<{ subscribed: boolean; created: boolean }>('POST', `/api/channels/${channelId}/subscribe`);
+    expect(subscribed.status).toBe(200);
+    expect(subscribed.body).toEqual({ subscribed: true, created: true });
+    const subscriberPost = await helper.request('POST', `/api/channels/${channelId}/posts`, { body: { body: 'محاولة نشر من مشترك' } });
+    expect(subscriberPost.status).toBe(403);
+    const subscriberPin = await helper.request('POST', `/api/channels/${channelId}/posts/00000000-0000-4000-8000-000000000000/pin`, {
+      body: { pinned: true },
+    });
+    expect(subscriberPin.status).toBe(403);
+
+    // The owner promotes the subscriber to moderator → posting is allowed, pinning is not.
+    const promoted = await owner.request<{ updated: boolean }>('POST', `/api/channels/${channelId}/members/${helper.userId}/role`, {
+      body: { role: 'moderator' },
+    });
+    expect(promoted.status).toBe(200);
+    expect(promoted.body.updated).toBe(true);
+
+    const moderatorPost = await helper.request<{ post: { id: string; pinnedAt: string | null } }>(
+      'POST',
+      `/api/channels/${channelId}/posts`,
+      { body: { body: 'إعلان من مشرف' } },
+    );
+    expect(moderatorPost.status).toBe(201);
+    const postId = moderatorPost.body.post.id;
+    expect(moderatorPost.body.post.pinnedAt).toBeNull();
+
+    const moderatorPin = await helper.request('POST', `/api/channels/${channelId}/posts/${postId}/pin`, { body: { pinned: true } });
+    expect(moderatorPin.status).toBe(403);
+
+    const admin = await owner.request<{ updated: boolean }>('POST', `/api/channels/${channelId}/members/${helper.userId}/role`, {
+      body: { role: 'admin' },
+    });
+    expect(admin.status).toBe(200);
+    const pinned = await helper.request<{ pinned: boolean }>('POST', `/api/channels/${channelId}/posts/${postId}/pin`, { body: { pinned: true } });
+    expect(pinned.status).toBe(200);
+    expect(pinned.body.pinned).toBe(true);
+
+    // Pinning is visible to every subscriber and can be undone.
+    const listed = await outsider.request<{ items: Array<{ id: string; pinnedAt: string | null }> }>(
+      'GET',
+      `/api/channels/${channelId}/posts`,
+      { token: null },
+    );
+    expect(listed.status).toBe(200);
+    expect(listed.body.items.find((item) => item.id === postId)?.pinnedAt).toBeTruthy();
+    const unpinned = await helper.request<{ pinned: boolean }>('POST', `/api/channels/${channelId}/posts/${postId}/pin`, {
+      body: { pinned: false },
+    });
+    expect(unpinned.status).toBe(200);
+    expect(unpinned.body.pinned).toBe(false);
+
+    // Demotion takes effect immediately, and the owner's own role cannot be reassigned away.
+    const demoted = await owner.request('POST', `/api/channels/${channelId}/members/${helper.userId}/role`, { body: { role: 'subscriber' } });
+    expect(demoted.status).toBe(200);
+    const pinAfterDemotion = await helper.request('POST', `/api/channels/${channelId}/posts/${postId}/pin`, { body: { pinned: true } });
+    expect(pinAfterDemotion.status).toBe(403);
+    const ownerDemotion = await helper.request('POST', `/api/channels/${channelId}/members/${owner.userId}/role`, { body: { role: 'subscriber' } });
+    expect(ownerDemotion.status).toBe(403);
+
+    // Role changes are audited, and the channel's own admins can review them (requirement:
+    // reviewable moderation) without being platform staff.
+    const audit = await owner.request<{ items: Array<{ action: string; targetId: string | null }> }>(
+      'GET',
+      `/api/channels/${channelId}/audit?limit=50`,
+    );
+    expect(audit.status).toBe(200);
+    expect(audit.body.items.some((entry) => entry.action === 'channel.role_changed')).toBe(true);
+    expect(audit.body.items.every((entry) => entry.targetId === channelId)).toBe(true);
+
+    // A plain subscriber cannot read the audit trail, and the staff-wide log stays staff-only.
+    const subscriberAudit = await helper.request('GET', `/api/channels/${channelId}/audit`);
+    expect(subscriberAudit.status).toBe(403);
+    const staffAudit = await owner.request('GET', '/api/moderation/audit?limit=50');
+    expect(staffAudit.status).toBe(403);
+  });
 });

@@ -13,6 +13,9 @@ export interface Viewer {
   avatarUrl: string | null;
   bio: string | null;
   role: 'user' | 'moderator' | 'admin';
+  isVerified: boolean;
+  /** Server-reported E2EE readiness; false until phase 5 ships, so the UI never over-claims. */
+  e2eeReady: boolean;
   locale: 'ar' | 'en';
   theme: 'light' | 'dark' | 'system';
   twoFactorEnabled: boolean;

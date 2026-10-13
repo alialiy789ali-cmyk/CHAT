@@ -116,7 +116,9 @@
 | POST | `/channels/join/:code` | قبول الدعوة |
 | GET/POST | `/channels/:channelId/posts` | المنشورات (٪+) |
 | POST/DELETE | `/channels/:channelId/posts/:postId[/pin]` | تثبيت/حذف |
-| POST | `/channels/:channelId/members/:userId/role` | `{role: admin\|moderator\|subscriber}` |
+| POST | `/channels/:channelId/members/:userId/role` | `{role: admin\|moderator\|subscriber}` — يرفض تغيير دور المالك |
+| GET | `/channels/:channelId/audit` | سجل تدقيق **مخصّص للقناة** (مالك/مشرف فقط): من رقّى/حذف/أنشأ دعوة ومتى. السجل العام `/moderation/audit` يبقى للمشرفين على مستوى المنصة |
+| — | — | ملاحظة: إنشاء قناة باسم عربي بلا `slug` يولّد رابطاً لاتينياً تلقائياً؛ و`slug` صريح مكرر يُرفض بـ`slug_taken` |
 
 ## المكالمات
 

@@ -38,7 +38,11 @@ export class AuditRepo {
     }
   }
 
-  async list(filter: { action?: string; actorId?: string; limit: number; offset: number }) {
+  /**
+   * Lists audit entries. `targetType`/`targetId` scope the query to one object, which is how
+   * channel owners review what happened inside their own channel without staff privileges.
+   */
+  async list(filter: { action?: string; actorId?: string; targetType?: string; targetId?: string; limit: number; offset: number }) {
     const rows = await this.db.many<{
       id: string;
       actor_id: string | null;
@@ -51,9 +55,19 @@ export class AuditRepo {
     }>(
       `select id, actor_id, actor_ip, action, target_type, target_id, metadata, created_at
        from audit_logs
-       where ($1::text is null or action = $1) and ($2::uuid is null or actor_id = $2)
-       order by created_at desc limit $3 offset $4`,
-      [filter.action ?? null, filter.actorId ?? null, filter.limit, filter.offset],
+       where ($1::text is null or action = $1)
+         and ($2::uuid is null or actor_id = $2)
+         and ($3::text is null or target_type = $3)
+         and ($4::text is null or target_id = $4)
+       order by created_at desc limit $5 offset $6`,
+      [
+        filter.action ?? null,
+        filter.actorId ?? null,
+        filter.targetType ?? null,
+        filter.targetId ?? null,
+        filter.limit,
+        filter.offset,
+      ],
     );
     return rows.map((row) => ({
       id: Number(row.id),
