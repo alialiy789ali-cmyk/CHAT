@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { api } from '@/lib/api';
 import { Avatar, Button, EmptyState, Spinner } from '@/components/ui';
 import { useSession } from '@/lib/session';
-import { PostCard } from '@/app/app/feed/page';
+import { PostCard } from '@/components/post-card';
 import type { Post } from '@/components/post';
 
 /** Unified search: users, public posts and channels — plus trending hashtags. */

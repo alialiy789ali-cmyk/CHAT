@@ -1,0 +1,47 @@
+{
+  "expo": {
+    "name": "سيادي",
+    "slug": "sovereign",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "scheme": "sovereign",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "splash": {
+      "backgroundColor": "#0d1117",
+      "resizeMode": "contain"
+    },
+    "assetBundlePatterns": ["**/*"],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "app.sovereign.client",
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "لإرسال الرسائل الصوتية وإجراء المكالمات الصوتية.",
+        "NSCameraUsageDescription": "لإجراء مكالمات الفيديو وإرسال الصور.",
+        "NSPhotoLibraryUsageDescription": "لإرفاق الصور في المحادثات والمنشورات.",
+        "NSAppTransportSecurity": { "NSAllowsLocalNetworking": true }
+      }
+    },
+    "android": {
+      "package": "app.sovereign.client",
+      "adaptiveIcon": {
+        "backgroundColor": "#0d1117",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "permissions": ["CAMERA", "RECORD_AUDIO", "INTERNET", "VIBRATE", "POST_NOTIFICATIONS"],
+      "predictiveBackGestureEnabled": false,
+      "usesCleartextTraffic": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": ["expo-secure-store"],
+    "extra": {
+      "//": "Override at build time: EXPO_PUBLIC_API_URL / EXPO_PUBLIC_WS_URL. On a device, use the LAN address of your server (e.g. http://192.168.1.20:8787) — localhost points at the phone itself.",
+      "apiUrl": "http://10.0.2.2:8787"
+    }
+  }
+}

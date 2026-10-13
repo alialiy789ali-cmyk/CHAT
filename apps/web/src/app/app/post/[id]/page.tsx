@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { api, ApiError } from '@/lib/api';
 import { Button, EmptyState, Spinner } from '@/components/ui';
 import { useSession } from '@/lib/session';
-import { PostCard } from '@/app/app/feed/page';
+import { PostCard } from '@/components/post-card';
 import type { Post } from '@/components/post';
 
 /** Single post view: the post, its replies and a link back to the author's profile. */

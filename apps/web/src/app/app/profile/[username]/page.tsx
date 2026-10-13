@@ -6,7 +6,7 @@ import { api, ApiError } from '@/lib/api';
 import { Avatar, Badge, Button, EmptyState, Spinner } from '@/components/ui';
 import { useSession } from '@/lib/session';
 import { useT } from '@/lib/i18n';
-import { PostCard } from '@/app/app/feed/page';
+import { PostCard } from '@/components/post-card';
 import type { Post } from '@/components/post';
 
 interface ProfilePayload {

@@ -11,7 +11,8 @@
   "workspaces": [
     "packages/*",
     "apps/server",
-    "apps/web"
+    "apps/web",
+    "apps/mobile"
   ],
   "scripts": {
     "db:up": "npm run db:up -w @sovereign/server",
@@ -22,7 +23,7 @@
     "dev:web": "npm run dev -w @sovereign/web",
     "dev": "concurrently -n api,web -c cyan,magenta \"npm:dev:server\" \"npm:dev:web\"",
     "build": "npm run build -w @sovereign/server && npm run build -w @sovereign/web",
-    "typecheck": "npm run typecheck -w @sovereign/server && npm run typecheck -w @sovereign/web",
+    "typecheck": "npm run typecheck -w @sovereign/server && npm run typecheck -w @sovereign/web && npm run typecheck -w @sovereign/mobile",
     "test": "npm run test -w @sovereign/server",
     "test:e2e": "npm run test:e2e -w @sovereign/server",
     "seed": "npm run seed -w @sovereign/server",
@@ -30,7 +31,8 @@
     "smoke": "npm run smoke -w @sovereign/server",
     "test:all": "npm run test:all -w @sovereign/server",
     "clean": "rm -rf apps/*/dist packages/*/dist apps/web/.next apps/server/var/pgdata",
-    "check:api": "npm run check:api -w @sovereign/web"
+    "check:api": "npm run check:api -w @sovereign/web",
+    "dev:mobile": "npm run start -w @sovereign/mobile"
   },
   "devDependencies": {
     "concurrently": "^9.2.1"
