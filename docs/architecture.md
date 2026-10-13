@@ -1,5 +1,23 @@
 # العمارة · Architecture
 
+## التشفير الطرفي (بنية)
+
+```
+جهاز A                    الخادم                     جهاز B
+  |  PUT /keys/identity  →  device_keys (عام فقط)
+  |  GET /keys/:userId   →  حزمة + استهلاك prekey واحد
+  |  SessionBuilder (X3DH) ← libsignal على الجهاز
+  |  ciphertext (base64) →  messages.ciphertext = مغلف غير مفهوم
+  |                          body = NULL دائماً
+  |                            →  WS/HTTP  →  SignalMessage/PreKeySignalMessage
+  |                                          signalDecrypt → النص الأصلي
+```
+
+- الخادم لا يستورد `@signalapp/libsignal-client` إطلاقاً؛ إن احتاجه يوماً لقراءة رسالة فالتصميم
+  مكسور. هذا ثابت مفروض باختبار لا بتعليق.
+- كل جهاز له هويته المستقلة (multi-device أصلي)، وprekeys لمرة واحدة تُستهلك استهلاكاً ذرّياً.
+- حالة التحقق (بصمة الأمان) تخص **المتحقق** لا الجهاز، وتُخزَّن في `device_verifications`.
+
 ## المبادئ
 
 1. **السيادة**: كل مكوّن قابل للتشغيل على بنية المالك (PostgreSQL، Redis، MinIO/S3 متوافق، coturn).

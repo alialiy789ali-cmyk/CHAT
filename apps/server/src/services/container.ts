@@ -7,6 +7,7 @@ import { SocialService } from './social.service.js';
 import { UploadsService } from './uploads.service.js';
 import { ModerationService } from './moderation.service.js';
 import { CallsService } from './calls.service.js';
+import { KeysService } from './keys.service.js';
 import { RealtimeHub } from '../realtime/hub.js';
 import { DomainEvents } from './events.js';
 
@@ -23,6 +24,7 @@ export class ServiceContainer {
   readonly uploads: UploadsService;
   readonly moderation: ModerationService;
   readonly calls: CallsService;
+  readonly keys: KeysService;
   readonly events: DomainEvents;
   readonly realtime: RealtimeHub;
 
@@ -37,6 +39,7 @@ export class ServiceContainer {
     this.uploads = new UploadsService(deps);
     this.moderation = new ModerationService(deps);
     this.calls = new CallsService(deps, this.realtime, this.events);
+    this.keys = new KeysService(deps, this.events);
   }
 
   async start(): Promise<void> {

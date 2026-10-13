@@ -79,6 +79,10 @@ export function messageToDto(
     forwardedFromId: row.forwarded_from_id,
     attachments: deleted ? [] : attachments.map(attachmentToDto),
     mentions: row.mentions ?? [],
+    // The envelope travels through the API untouched: it is readable only by devices that
+    // hold the session keys. Deleting a message clears it (see messages repo softDelete).
+    ciphertext: deleted ? null : row.ciphertext,
+    encryptionScheme: (deleted ? 'none' : row.encryption_scheme) as 'none' | 'libsignal-v1',
     editedAt: row.edited_at ? row.edited_at.toISOString() : null,
     deletedAt: row.deleted_at ? row.deleted_at.toISOString() : null,
     state: receiptState,

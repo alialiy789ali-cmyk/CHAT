@@ -12,6 +12,8 @@ export interface DeviceRow {
   name: string;
   platform: 'web' | 'android' | 'ios' | 'desktop' | 'unknown';
   push_token: string | null;
+  /** Small JSON bag for public device metadata (e.g. the published Kyber prekey). */
+  metadata?: Record<string, unknown>;
   last_seen_at: Date;
   created_at: Date;
   revoked_at: Date | null;
@@ -50,7 +52,7 @@ export class SessionsRepo {
 
   listDevices(userId: string): Promise<DeviceRow[]> {
     return this.db.many<DeviceRow>(
-      `select id, user_id, name, platform, push_token, last_seen_at, created_at, revoked_at
+      `select id, user_id, name, platform, push_token, metadata, last_seen_at, created_at, revoked_at
        from devices where user_id = $1 and revoked_at is null order by last_seen_at desc`,
       [userId],
     );
@@ -63,6 +65,21 @@ export class SessionsRepo {
     );
     await this.db.query('delete from device_keys where device_id = $1', [deviceId]);
     return res.rowCount ?? 0;
+  }
+
+  findDevice(deviceId: string): Promise<DeviceRow | null> {
+    return this.db.one<DeviceRow>(
+      'select id, user_id, name, platform, push_token, metadata, last_seen_at, created_at, revoked_at from devices where id = $1',
+      [deviceId],
+    );
+  }
+
+  /** Public per-device metadata (today: the current Kyber prekey). Never holds private keys. */
+  async setDeviceMetadata(deviceId: string, patch: Record<string, unknown>): Promise<void> {
+    await this.db.query(
+      `update devices set metadata = coalesce(metadata, '{}'::jsonb) || $2::jsonb where id = $1`,
+      [deviceId, JSON.stringify(patch)],
+    );
   }
 
   async touchDevice(deviceId: string): Promise<void> {

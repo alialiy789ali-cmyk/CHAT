@@ -235,3 +235,64 @@ export type RegisterInput = z.infer<typeof registerSchema>;
 export type LoginInput = z.infer<typeof loginSchema>;
 export type SendMessageInput = z.infer<typeof sendMessageSchema>;
 export type CreatePostInput = z.infer<typeof createPostSchema>;
+
+/* ---------------------------------------------------------------- E2EE key material */
+
+/**
+ * Base64 (with or without padding) as produced by the audited Signal library bindings.
+ * Lengths are not pinned: key sizes differ between Curve25519 (32 bytes) and Kyber (1568).
+ */
+const base64Schema = z
+  .string()
+  .min(1)
+  .max(4096)
+  .regex(/^[A-Za-z0-9+/=_-]+$/, 'invalid_base64');
+
+export const deviceKeyBundleSchema = z.object({
+  /** Device the bundle belongs to; defaults to the session's device when omitted. */
+  deviceId: uuidSchema.optional(),
+  identityKey: base64Schema,
+  registrationId: z.number().int().min(1).max(16383),
+  signedPreKey: z.object({
+    id: z.number().int().min(0).max(16_777_215),
+    publicKey: base64Schema,
+    signature: base64Schema,
+  }),
+  /** Kyber (post-quantum) prekey — required by libsignal v1 sessions. */
+  kyberPreKey: z
+    .object({
+      id: z.number().int().min(0).max(16_777_215),
+      publicKey: base64Schema,
+      signature: base64Schema,
+    })
+    .optional(),
+  oneTimePreKeys: z
+    .array(
+      z.object({
+        id: z.number().int().min(0).max(16_777_215),
+        publicKey: base64Schema,
+      }),
+    )
+    .max(200)
+    .default([]),
+});
+
+export const replenishPreKeysSchema = z.object({
+  deviceId: uuidSchema.optional(),
+  oneTimePreKeys: z
+    .array(z.object({ id: z.number().int().min(0).max(16_777_215), publicKey: base64Schema }))
+    .min(1)
+    .max(200),
+});
+
+export const deviceVerificationSchema = z.object({
+  deviceId: uuidSchema,
+  /** Safety number the verifier compared, formatted by the client. */
+  fingerprint: z.string().trim().min(8).max(256),
+  verified: z.boolean(),
+});
+
+export const conversationEncryptionSchema = z.object({ enabled: z.boolean() });
+
+export type DeviceKeyBundleInput = z.infer<typeof deviceKeyBundleSchema>;
+export type DeviceVerificationInput = z.infer<typeof deviceVerificationSchema>;

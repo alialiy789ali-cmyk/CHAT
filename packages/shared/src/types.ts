@@ -85,6 +85,13 @@ export interface Message {
   forwardedFromId: UUID | null;
   attachments: Attachment[];
   mentions: UUID[];
+  /**
+   * Opaque E2EE envelope (base64 of the serialized Signal message). The server stores and
+   * relays it without being able to read it; only devices with the matching session keys can
+   * decrypt it. `null` for ordinary plaintext messages.
+   */
+  ciphertext: string | null;
+  encryptionScheme: 'none' | 'libsignal-v1';
   editedAt: string | null;
   deletedAt: string | null;
   state: MessageState;

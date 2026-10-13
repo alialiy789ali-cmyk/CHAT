@@ -13,8 +13,12 @@ export interface DeviceKeyRow {
   user_id: string;
   device_id: string;
   identity_key_public: string;
+  signed_prekey_id: number;
   signed_prekey_public: string;
   signed_prekey_signature: string;
+  kyber_prekey_id: number | null;
+  kyber_prekey_public: string | null;
+  kyber_prekey_signature: string | null;
   one_time_prekeys: Array<{ id: number; key: string }>;
   registration_id: number;
   algorithm: 'libsignal-v1';
@@ -31,18 +35,25 @@ export class KeysRepo {
     userId: string;
     deviceId: string;
     identityKeyPublic: string;
+    signedPrekeyId?: number;
     signedPrekeyPublic: string;
     signedPrekeySignature: string;
+    kyberPrekey?: { id: number; publicKey: string; signature: string } | null;
     oneTimePrekeys: Array<{ id: number; key: string }>;
     registrationId: number;
   }): Promise<DeviceKeyRow> {
     return this.db.oneOrFail<DeviceKeyRow>(
-      `insert into device_keys (user_id, device_id, identity_key_public, signed_prekey_public, signed_prekey_signature, one_time_prekeys, registration_id)
-       values ($1, $2, $3, $4, $5, $6, $7)
+      `insert into device_keys (user_id, device_id, identity_key_public, signed_prekey_id, signed_prekey_public, signed_prekey_signature,
+                                kyber_prekey_id, kyber_prekey_public, kyber_prekey_signature, one_time_prekeys, registration_id)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        on conflict (device_id) do update set
          identity_key_public = excluded.identity_key_public,
+         signed_prekey_id = excluded.signed_prekey_id,
          signed_prekey_public = excluded.signed_prekey_public,
          signed_prekey_signature = excluded.signed_prekey_signature,
+         kyber_prekey_id = excluded.kyber_prekey_id,
+         kyber_prekey_public = excluded.kyber_prekey_public,
+         kyber_prekey_signature = excluded.kyber_prekey_signature,
          one_time_prekeys = excluded.one_time_prekeys,
          registration_id = excluded.registration_id,
          updated_at = now()
@@ -51,8 +62,12 @@ export class KeysRepo {
         input.userId,
         input.deviceId,
         input.identityKeyPublic,
+        input.signedPrekeyId ?? 0,
         input.signedPrekeyPublic,
         input.signedPrekeySignature,
+        input.kyberPrekey?.id ?? null,
+        input.kyberPrekey?.publicKey ?? null,
+        input.kyberPrekey?.signature ?? null,
         JSON.stringify(input.oneTimePrekeys),
         input.registrationId,
       ],
@@ -60,19 +75,55 @@ export class KeysRepo {
     );
   }
 
+  findByDevice(deviceId: string): Promise<DeviceKeyRow | null> {
+    return this.db.one<DeviceKeyRow>('select * from device_keys where device_id = $1', [deviceId]);
+  }
+
+  /** Per-device prekey inventory, used by the client to know when to replenish. */
+  async inventory(userId: string) {
+    const rows = await this.db.many<{ device_id: string; remaining: string; identity_key_public: string; verified_at: Date | null }>(
+      `select device_id, jsonb_array_length(one_time_prekeys)::text as remaining, identity_key_public, verified_at
+       from device_keys where user_id = $1`,
+      [userId],
+    );
+    return rows.map((row) => ({
+      deviceId: row.device_id,
+      remainingOneTimePreKeys: Number(row.remaining),
+      identityKey: row.identity_key_public,
+      verifiedAt: row.verified_at,
+    }));
+  }
+
+  async appendOneTimePrekeys(deviceId: string, keys: Array<{ id: number; key: string }>): Promise<number> {
+    const row = await this.db.oneOrFail<{ one_time_prekeys: Array<{ id: number; key: string }> }>(
+      `update device_keys
+       set one_time_prekeys = one_time_prekeys || $2::jsonb, updated_at = now()
+       where device_id = $1
+       returning one_time_prekeys`,
+      [deviceId, JSON.stringify(keys)],
+      'not_found',
+    );
+    return row.one_time_prekeys.length;
+  }
+
   forUser(userId: string) {
     return this.db.many<{
       device_id: string;
       identity_key_public: string;
+      signed_prekey_id: number;
       signed_prekey_public: string;
       signed_prekey_signature: string;
+      kyber_prekey_id: number | null;
+      kyber_prekey_public: string | null;
+      kyber_prekey_signature: string | null;
       registration_id: number;
       verification_fingerprint: string | null;
       verified_at: Date | null;
       device_name: string | null;
       platform: string | null;
     }>(
-      `select k.device_id, k.identity_key_public, k.signed_prekey_public, k.signed_prekey_signature, k.registration_id,
+      `select k.device_id, k.identity_key_public, k.signed_prekey_id, k.signed_prekey_public, k.signed_prekey_signature,
+              k.kyber_prekey_id, k.kyber_prekey_public, k.kyber_prekey_signature, k.registration_id,
               k.verification_fingerprint, k.verified_at, d.name as device_name, d.platform
        from device_keys k join devices d on d.id = k.device_id
        where k.user_id = $1 and d.revoked_at is null`,
@@ -105,16 +156,73 @@ export class KeysRepo {
     return Number(row?.count ?? 0);
   }
 
-  async setVerification(deviceId: string, fingerprint: string, verified: boolean): Promise<void> {
-    await this.db.query(
-      'update device_keys set verification_fingerprint = $2, verified_at = case when $3 then now() else null end where device_id = $1',
-      [deviceId, fingerprint, verified],
-    );
-    await this.db.query('update devices set identity_key_fingerprint = $2 where id = $1', [deviceId, fingerprint]);
-  }
-
   async markUserE2eeReady(userId: string, ready: boolean): Promise<void> {
     await this.db.query('update users set e2ee_ready = $2 where id = $1', [userId, ready]);
+  }
+
+  /** ------------------------------------------------------- device verification */
+
+  /**
+   * Records that `verifierId` compared the safety number of one specific device.
+   * `verified: false` removes the mark (an unverified device must never look verified).
+   */
+  async setVerification(input: {
+    verifierId: string;
+    deviceId: string;
+    fingerprint: string;
+    verified: boolean;
+  }): Promise<void> {
+    if (!input.verified) {
+      await this.db.query('delete from device_verifications where verifier_id = $1 and device_id = $2', [
+        input.verifierId,
+        input.deviceId,
+      ]);
+      return;
+    }
+    await this.db.query(
+      `insert into device_verifications (verifier_id, device_id, fingerprint, verified_at)
+       values ($1, $2, $3, now())
+       on conflict (verifier_id, device_id) do update set fingerprint = excluded.fingerprint, verified_at = now()`,
+      [input.verifierId, input.deviceId, input.fingerprint],
+    );
+    // Cache the fingerprint on the device row so other members can display "verified by N people"
+    // without joining every verification row.
+    await this.db.query('update devices set identity_key_fingerprint = $2 where id = $1', [input.deviceId, input.fingerprint]);
+    await this.db.query(
+      'update device_keys set verification_fingerprint = $2, verified_at = now() where device_id = $1',
+      [input.deviceId, input.fingerprint],
+    );
+  }
+
+  /** Verification state of every key-publishing device of `userId`, as seen by `verifierId`. */
+  async verificationsFor(verifierId: string, userId: string) {
+    const rows = await this.db.many<{
+      device_id: string;
+      fingerprint: string;
+      verified_at: Date | null;
+      device_name: string | null;
+      platform: string | null;
+    }>(
+      `select k.device_id,
+              coalesce(v.fingerprint, k.identity_key_public) as fingerprint,
+              v.verified_at,
+              d.name as device_name,
+              d.platform
+       from device_keys k
+       join devices d on d.id = k.device_id
+       left join device_verifications v on v.device_id = k.device_id and v.verifier_id = $1
+       where k.user_id = $2 and d.revoked_at is null
+       order by d.created_at asc`,
+      [verifierId, userId],
+    );
+    return rows.map((row) => ({
+      deviceId: row.device_id,
+      fingerprint: row.fingerprint,
+      verified: row.verified_at !== null,
+      verifiedAt: row.verified_at,
+      deviceName: row.device_name,
+      platform: row.platform,
+    }));
   }
 
   /** ------------------------------------------------------------- push subscriptions */

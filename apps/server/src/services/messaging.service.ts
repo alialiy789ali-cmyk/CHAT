@@ -382,8 +382,13 @@ export class MessagingService {
       throw new AppError('e2ee_not_available', 'e2ee_disabled_on_server');
     }
 
+    // An encrypted message carries its content inside the ciphertext, so an empty body is
+    // expected there; for plaintext conversations the content requirement still applies.
     assert(
-      body.trim().length > 0 || attachmentIds.length > 0 || input.type === 'voice',
+      body.trim().length > 0 ||
+        attachmentIds.length > 0 ||
+        input.type === 'voice' ||
+        (Boolean(input.ciphertext) && conversation.is_encrypted),
       'validation_error',
       'message_must_have_content',
     );

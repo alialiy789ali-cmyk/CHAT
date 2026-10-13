@@ -10,6 +10,34 @@
 
 ---
 
+### التشفير الطرفي (E2EE)
+
+يوزّع الخادم **المفاتيح العامة** وينقل **النص المشفّر** كما هو. لا يستقبل الخادم مفتاحاً خاصاً
+أبداً، ولا يستطيع فك المحتوى.
+
+| الطريقة | المسار | الوصف |
+| --- | --- | --- |
+| PUT | `/keys/identity` | نشر/تدوير مفاتيح الجهاز: `{identityKey, registrationId, signedPreKey{id,publicKey,signature}, kyberPreKey?, oneTimePreKeys[]}` (base64) → `{deviceId, identityRotated, oneTimePreKeysStored}` |
+| POST | `/keys/prekeys` | تعبئة prekeys لمرة واحدة `{oneTimePreKeys[]}` عندما ينخفض العدد |
+| GET | `/keys/me` | جرد المفاتيح لكل جهاز (`remainingOneTimePreKeys`, `hasKyberPreKey`) |
+| GET | `/keys/:userId` | حِزم الأجهزة للطرف الآخر — **يُستهلك prekey واحد لكل جهاز** عند كل طلب، ويحترم الخصوصية والحظر |
+| POST | `/keys/verify` | `{deviceId, fingerprint, verified}` — تحقق **لك أنت وحدك** من بصمة جهاز الطرف الآخر |
+| GET | `/keys/verify/:userId` | حالة التحقق لكل أجهزة المستخدم كما تراها أنت (`verifiedCount`, `allVerified`) |
+| GET | `/conversations/:id/encryption` | حالة التشفير + جاهزية كل مشارك (`participants[].ready`) |
+| POST | `/conversations/:id/encryption` | `{enabled}` — للتفعيل يشترط أن يكون **كل** مشارك قد نشر مفاتيح، وإلا 409 `participant_without_keys:<id>` |
+
+ملاحظات تشغيلية مهمة:
+
+- كل ما سبق معطّل ما لم يكن `E2EE_ENABLED=true`، وعند التعطيل يرد الخادم 501
+  `e2ee_not_available` بدل القبول الصوري.
+- الرسائل المشفّرة تُرسل عبر نفس مسار الرسائل العادي:
+  `POST /conversations/:id/messages {clientMessageId, ciphertext, encryptionScheme: 'libsignal-v1'}`
+  ويعود `body: null` مع `ciphertext` — الطرف الآخر يفكّها على جهازه.
+- في المحادثة المشفّرة يرفض الخادم النص العادي (501) حتى لا يحدث «تخفيض صامت» للتشفير.
+- قناة ومنشورات القنوات **ليست** مشفّرة طرفياً بطبيعتها (محتوى عام/واسع الانتشار) ويجب أن يظهر
+  ذلك بصراحة في الواجهة.
+- البحث في الرسائل لا يمكن أن يعثر على رسائل مشفّرة: لا يوجد `body` ليفهرسه الخادم.
+
 ## المصادقة
 
 | الطريقة | المسار | الوصف |

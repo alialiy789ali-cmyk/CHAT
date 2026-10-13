@@ -29,6 +29,7 @@ export class ApiClient {
   private accessToken: string | null = null;
   refreshToken: string | null = null;
   userId: string | null = null;
+  deviceId: string | null = null;
   username: string | null = null;
   email: string | null = null;
 
@@ -87,6 +88,7 @@ export class ApiClient {
       user: { id: string; username: string };
       accessToken: string;
       refreshToken: string;
+      deviceId: string;
     }>('POST', '/api/auth/register', {
       body: { username, email, password, displayName: input?.displayName ?? username, device: { name: 'Test runner', platform: 'web' } },
       token: null,
@@ -95,6 +97,7 @@ export class ApiClient {
     this.accessToken = res.body.accessToken;
     this.refreshToken = res.body.refreshToken;
     this.userId = res.body.user.id;
+    this.deviceId = res.body.deviceId ?? null;
     this.username = res.body.user.username;
     this.email = email;
     return res.body;

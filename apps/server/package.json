@@ -48,6 +48,7 @@
     "@types/ws": "^8.18.1",
     "tsx": "^4.23.15",
     "typescript": "^5.9.3",
-    "vitest": "^3.2.7"
+    "vitest": "^3.2.7",
+    "@signalapp/libsignal-client": "^0.105.0"
   }
 }

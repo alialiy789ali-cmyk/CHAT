@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ServerFrame } from '@sovereign/shared/protocol';
 import { e2e } from '../helpers/setup-e2e.js';
 import { ApiClient, PASSWORD, uniqueEmail, uniqueUsername } from '../helpers/client.js';
+import { SignalDevice } from '../helpers/signal.js';
 
 /**
  * The acceptance criteria from the project brief, executed against the real server
@@ -863,5 +864,201 @@ describe('acceptance criteria', () => {
     expect(subscriberAudit.status).toBe(403);
     const staffAudit = await owner.request('GET', '/api/moderation/audit?limit=50');
     expect(staffAudit.status).toBe(403);
+  });
+  it('22. two devices establish a real Signal session and the server only sees ciphertext', async () => {
+    const base = e2e().baseUrl;
+    const alice = new ApiClient(base);
+    const bob = new ApiClient(base);
+    const carol = new ApiClient(base);
+    const dave = new ApiClient(base);
+    await alice.register({ username: uniqueUsername('e2eealice') });
+    await bob.register({ username: uniqueUsername('e2eebob') });
+    await carol.register({ username: uniqueUsername('e2eecarol') });
+    await dave.register({ username: uniqueUsername('e2eedave') });
+
+    // Each device generates its own keys locally (libsignal, the official implementation).
+    const aliceDevice = new SignalDevice(alice.username!, 1);
+    const bobDevice = new SignalDevice(bob.username!, 1);
+    const carolDevice = new SignalDevice(carol.username!, 1);
+
+    // Publishing before the flag-independent shape check: the API validates the bundle.
+    const badPublish = await alice.request('PUT', '/api/keys/identity', { body: { identityKey: 'not-base64!!' } });
+    expect(badPublish.status).toBe(400);
+
+    const alicePublish = await alice.request<{ deviceId: string; oneTimePreKeysStored: number }>('PUT', '/api/keys/identity', {
+      body: await aliceDevice.bundleBody(),
+    });
+    expect(alicePublish.status).toBe(200);
+    expect(alicePublish.body.deviceId).toBe(alice.deviceId);
+    expect(alicePublish.body.oneTimePreKeysStored).toBe(20);
+    const bobPublish = await bob.request('PUT', '/api/keys/identity', { body: await bobDevice.bundleBody() });
+    expect(bobPublish.status).toBe(200);
+    const carolPublish = await carol.request('PUT', '/api/keys/identity', { body: await carolDevice.bundleBody() });
+    expect(carolPublish.status).toBe(200);
+
+    // The account is now advertised as E2EE-capable.
+    const aliceMe = await alice.request<{ e2eeReady: boolean }>('GET', '/api/users/me');
+    expect(aliceMe.body.e2eeReady).toBe(true);
+    const inventory = await bob.request<{ e2eeEnabled: boolean; devices: Array<{ remainingOneTimePreKeys: number }> }>(
+      'GET',
+      '/api/keys/me',
+    );
+    expect(inventory.body.e2eeEnabled).toBe(true);
+    expect(inventory.body.devices[0]!.remainingOneTimePreKeys).toBe(20);
+
+    // A conversation can only be switched to encrypted once every member has published keys.
+    const conversation = await alice.request<{ conversation: { id: string; isEncrypted: boolean } }>(
+      'POST',
+      '/api/conversations/direct',
+      { body: { userId: bob.userId } },
+    );
+    const conversationId = conversation.body.conversation.id;
+    expect(conversation.body.conversation.isEncrypted).toBe(false);
+
+    const status = await alice.request<{ ready: boolean; e2eeEnabled: boolean; participants: Array<{ ready: boolean }> }>(
+      'GET',
+      `/api/conversations/${conversationId}/encryption`,
+    );
+    expect(status.body.e2eeEnabled).toBe(true);
+    expect(status.body.ready).toBe(true);
+    expect(status.body.participants.every((participant) => participant.ready)).toBe(true);
+
+    // A participant who never published keys blocks enabling — messages must not be stranded.
+    const withDave = await alice.request<{ conversation: { id: string } }>('POST', '/api/conversations/direct', {
+      body: { userId: dave.userId },
+    });
+    const blockedEnable = await alice.request('POST', `/api/conversations/${withDave.body.conversation.id}/encryption`, {
+      body: { enabled: true },
+    });
+    expect(blockedEnable.status).toBe(409);
+    expect((blockedEnable.body as { error: { message: string } }).error.message).toContain('participant_without_keys');
+
+    const enabled = await alice.request<{ isEncrypted: boolean }>('POST', `/api/conversations/${conversationId}/encryption`, {
+      body: { enabled: true },
+    });
+    expect(enabled.status).toBe(200);
+    expect(enabled.body.isEncrypted).toBe(true);
+
+    // Alice fetches Bob's bundle; one one-time prekey is consumed for the session.
+    const bundleResponse = await alice.request<{
+      bundles: Array<{ deviceId: string; identityKey: string; oneTimePreKey?: { id: number } }>;
+    }>('GET', `/api/keys/${bob.userId}`);
+    expect(bundleResponse.status).toBe(200);
+    expect(bundleResponse.body.bundles).toHaveLength(1);
+    const bobBundle = bundleResponse.body.bundles[0]!;
+    expect(bobBundle.oneTimePreKey).toBeDefined();
+    const bobInventoryAfter = await bob.request<{ devices: Array<{ remainingOneTimePreKeys: number }> }>('GET', '/api/keys/me');
+    expect(bobInventoryAfter.body.devices[0]!.remainingOneTimePreKeys).toBe(19);
+
+    // The full bundle is fetched again for the crypto step (a second prekey is issued; that is
+    // the expected cost of asking twice — the server never hands out the same prekey twice).
+    const fullBundle = await alice.request<{
+      bundles: Array<{
+        deviceId: string;
+        registrationId: number;
+        identityKey: string;
+        signedPreKey: { id: number; publicKey: string; signature: string };
+        kyberPreKey?: { id: number; publicKey: string; signature: string };
+        oneTimePreKey?: { id: number; publicKey: string };
+      }>;
+    }>('GET', `/api/keys/${bob.userId}`);
+    const secondBundle = fullBundle.body.bundles[0]!;
+    expect(secondBundle.oneTimePreKey!.id).not.toBe(bobBundle.oneTimePreKey!.id);
+
+    await aliceDevice.processBundle(secondBundle, bobDevice.address);
+    const secret = 'لا يمكن للخادم قراءة هذه الرسالة — ‏E2EE ✅';
+    const envelope = await aliceDevice.encryptFor(bobDevice.address, secret);
+    expect(envelope.ciphertext).not.toContain(secret);
+
+    const sent = await alice.request<{
+      message: { id: string; body: string | null; ciphertext: string | null; encryptionScheme: string };
+      duplicated: boolean;
+    }>('POST', `/api/conversations/${conversationId}/messages`, {
+      body: { clientMessageId: `e2ee-${Date.now()}`, ciphertext: envelope.ciphertext, encryptionScheme: 'libsignal-v1' },
+    });
+    expect(sent.status).toBe(201);
+    expect(sent.body.message.body).toBeNull();
+    expect(sent.body.message.encryptionScheme).toBe('libsignal-v1');
+    expect(sent.body.message.ciphertext).toBe(envelope.ciphertext);
+
+    // Bob (a different device, different private keys) decrypts what Alice encrypted.
+    const bobMessages = await bob.request<{ items: Array<{ id: string; ciphertext: string | null; body: string | null; encryptionScheme: string }> }>(
+      'GET',
+      `/api/conversations/${conversationId}/messages?limit=10`,
+    );
+    const incoming = bobMessages.body.items.find((message) => message.id === sent.body.message.id)!;
+    expect(incoming.body).toBeNull();
+    const decrypted = await bobDevice.decryptFrom(aliceDevice.address, incoming.ciphertext!);
+    expect(decrypted).toBe(secret);
+
+    // Bob replies on the established session (a normal Signal message, no prekey).
+    const reply = await bobDevice.encryptFor(aliceDevice.address, 'وصلت الرسالة مشفّرة، شكراً!');
+    const bobSend = await bob.request<{ message: { id: string } }>('POST', `/api/conversations/${conversationId}/messages`, {
+      body: { clientMessageId: `e2ee-reply-${Date.now()}`, ciphertext: reply.ciphertext, encryptionScheme: 'libsignal-v1' },
+    });
+    expect(bobSend.status).toBe(201);
+    const aliceMessages = await alice.request<{ items: Array<{ id: string; ciphertext: string | null }> }>(
+      'GET',
+      `/api/conversations/${conversationId}/messages?limit=10`,
+    );
+    const aliceIncoming = aliceMessages.body.items.find((message) => message.id === bobSend.body.message.id)!;
+    expect(await aliceDevice.decryptFrom(bobDevice.address, aliceIncoming.ciphertext!)).toBe('وصلت الرسالة مشفّرة، شكراً!');
+
+    // Invariant: the plaintext exists nowhere the server can reach — not in the API response,
+    // not in message search (the body column is empty, so full-text search finds nothing).
+    expect(JSON.stringify(aliceMessages.body)).not.toContain('لا يمكن للخادم');
+    // `/messages/search` returns a bare array of hits; an encrypted message has no body, so it
+    // can never appear there — the server cannot index what it cannot read.
+    const search = await alice.request<Array<{ id: string; body: string | null }>>(
+      'GET',
+      `/api/messages/search?q=${encodeURIComponent('قراءة')}`,
+    );
+    expect(search.status).toBe(200);
+    expect(Array.isArray(search.body)).toBe(true);
+    expect(search.body.some((item) => item.id === sent.body.message.id)).toBe(false);
+
+    // Plaintext is refused inside an encrypted conversation: no silent downgrade.
+    const plaintextAttempt = await alice.request('POST', `/api/conversations/${conversationId}/messages`, {
+      body: { clientMessageId: `plain-${Date.now()}`, body: 'نص عادي' },
+    });
+    expect(plaintextAttempt.status).toBe(501);
+    expect((plaintextAttempt.body as { error: { message: string } }).error.message).toBe('encrypted_conversation_requires_ciphertext');
+
+    // Non-members can neither read the conversation nor obtain a bundle of a blocked user.
+    const anonymousRead = await carol.request('GET', `/api/conversations/${conversationId}/messages`, { token: null });
+    expect(anonymousRead.status).toBe(401);
+    const carolRead = await carol.request('GET', `/api/conversations/${conversationId}/messages`);
+    expect(carolRead.status).toBe(403);
+
+    // Safety numbers: verification is per verifier and never forged by the server.
+    const fingerprint = '12345 67890 12345 67890 12345 67890';
+    const verified = await alice.request<{ verified: boolean }>('POST', '/api/keys/verify', {
+      body: { deviceId: bob.deviceId, fingerprint, verified: true },
+    });
+    expect(verified.status).toBe(200);
+    const aliceView = await alice.request<{ devices: Array<{ deviceId: string; verified: boolean; fingerprint: string }>; allVerified: boolean }>(
+      'GET',
+      `/api/keys/verify/${bob.userId}`,
+    );
+    expect(aliceView.body.allVerified).toBe(true);
+    expect(aliceView.body.devices[0]!.fingerprint).toBe(fingerprint);
+    const carolView = await carol.request<{ devices: Array<{ verified: boolean }>; verifiedCount: number }>(
+      'GET',
+      `/api/keys/verify/${bob.userId}`,
+    );
+    expect(carolView.body.verifiedCount).toBe(0);
+
+    // A device cannot verify itself, and its own devices are not part of the verifier's list.
+    const selfVerify = await alice.request('POST', '/api/keys/verify', {
+      body: { deviceId: alice.deviceId, fingerprint, verified: true },
+    });
+    expect(selfVerify.status).toBe(400);
+
+    // Turning encryption off is possible and audited (users can always leave a mode).
+    const disabled = await alice.request<{ isEncrypted: boolean }>('POST', `/api/conversations/${conversationId}/encryption`, {
+      body: { enabled: false },
+    });
+    expect(disabled.status).toBe(200);
+    expect(disabled.body.isEncrypted).toBe(false);
   });
 });

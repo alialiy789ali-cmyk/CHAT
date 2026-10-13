@@ -39,6 +39,9 @@ beforeAll(async () => {
   process.env.FIELD_ENCRYPTION_KEY = 'test-field-encryption-key-32-chars-minimum';
   process.env.SESSION_SECRET = 'test-session-secret-value-32-chars-minimum';
   process.env.RATE_LIMIT_GLOBAL_MAX = '100000';
+  // Acceptance 22 exercises the real E2EE path (keys published by clients, ciphertext relayed
+  // untouched). With the flag off the server correctly *rejects* ciphertext — also asserted.
+  process.env.E2EE_ENABLED = 'true';
 
   // Hermetic database: a dedicated data directory that is wiped before and after the
   // run, so a leftover postmaster from an earlier test run can never be reused.

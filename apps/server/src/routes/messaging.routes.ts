@@ -10,6 +10,7 @@ import {
   sendMessageSchema,
   setMemberRoleSchema,
   updateConversationSchema,
+  conversationEncryptionSchema,
 } from '@sovereign/shared/validation';
 import type { ServiceContainer } from '../services/container.js';
 import { clientIp, type RequestContext } from '../services/context.js';
@@ -33,6 +34,19 @@ export async function registerMessagingRoutes(app: FastifyInstance, container: S
   app.get('/conversations', { preHandler: [app.authenticate], schema: { tags: ['messaging'] } }, async (request) => {
     const { limit, cursor } = paginationSchema.parse(request.query ?? {});
     return messaging.listConversations(request.auth!.userId, limit, cursor);
+  });
+
+  /** Encryption mode of a conversation and per-participant key readiness. */
+  app.get('/conversations/:conversationId/encryption', { preHandler: [app.authenticate], schema: { tags: ['e2ee'] } }, async (request) => {
+    const { conversationId } = request.params as { conversationId: string };
+    return container.keys.encryptionStatus(conversationId, request.auth!.userId);
+  });
+
+  /** Turns E2EE on/off for a conversation (every member must have published keys first). */
+  app.post('/conversations/:conversationId/encryption', { preHandler: [app.authenticate], schema: { tags: ['e2ee'] } }, async (request) => {
+    const { conversationId } = request.params as { conversationId: string };
+    const body = conversationEncryptionSchema.parse(request.body ?? {});
+    return container.keys.setConversationEncryption(conversationId, request.auth!.userId, body.enabled, ctxOf(request));
   });
 
   app.post('/conversations/direct', { preHandler: [app.authenticate], schema: { tags: ['messaging'] } }, async (request) => {

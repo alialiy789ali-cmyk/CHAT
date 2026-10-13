@@ -8,6 +8,7 @@ import { registerFileRoutes } from './files.routes.js';
 import { registerSocialRoutes } from './social.routes.js';
 import { registerChannelRoutes } from './channels.routes.js';
 import { registerCallRoutes } from './calls.routes.js';
+import { registerKeyRoutes } from './keys.routes.js';
 import { registerModerationRoutes } from './moderation.routes.js';
 
 /** Every route is registered under /api and tagged for the generated documentation. */
@@ -22,6 +23,7 @@ export async function registerRoutes(app: FastifyInstance, container: ServiceCon
       await registerSocialRoutes(api, container);
       await registerChannelRoutes(api, container);
       await registerCallRoutes(api, container);
+      await registerKeyRoutes(api, container);
       await registerModerationRoutes(api, container);
     },
     { prefix: '/api' },

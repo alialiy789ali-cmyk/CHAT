@@ -147,6 +147,19 @@ export class ConversationsRepo {
     return Boolean(row?.exists);
   }
 
+  /** Active members with their role, used for E2EE readiness and fan-out decisions. */
+  async members(conversationId: string): Promise<Array<{ user_id: string; role: MemberRole }>> {
+    return this.db.many<{ user_id: string; role: MemberRole }>(
+      'select user_id, role from conversation_members where conversation_id = $1 and left_at is null',
+      [conversationId],
+    );
+  }
+
+  /** Flips the E2EE flag. Ciphertext envelopes are rejected while it is false (see messaging service). */
+  async setEncrypted(conversationId: string, encrypted: boolean): Promise<void> {
+    await this.db.query('update conversations set is_encrypted = $2 where id = $1', [conversationId, encrypted]);
+  }
+
   async memberIds(conversationId: string): Promise<string[]> {
     const rows = await this.db.many<{ user_id: string }>(
       'select user_id from conversation_members where conversation_id = $1 and left_at is null',
