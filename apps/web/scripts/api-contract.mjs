@@ -95,5 +95,25 @@ ok('PATCH /users/me/privacy', privacy.status < 300);
 const exported = await call('/api/users/me/export', { token: layla });
 ok('GET /users/me/export', exported.status === 200 && typeof exported.json === 'object');
 
+console.log('\n[5] realtime through the web proxy');
+{
+  // Same handshake the browser performs: ticket over HTTP, then a WebSocket upgrade
+  // on the *same* origin (the web server proxies /ws to the API).
+  const { default: WebSocket } = await import('ws');
+  const ticketRes = await call('/api/auth/realtime-ticket', { method: 'POST', token: layla, body: {} });
+  ok('POST /auth/realtime-ticket', ticketRes.status === 200 && typeof ticketRes.json?.ticket === 'string');
+  const wsUrl = (process.env.WEB_WS_URL ?? BASE.replace(/^http/, 'ws')) + '/ws?ticket=' + encodeURIComponent(ticketRes.json.ticket);
+  const frame = await new Promise((resolve) => {
+    const socket = new WebSocket(wsUrl);
+    const timer = setTimeout(() => { socket.close(); resolve(null); }, 8000);
+    socket.on('message', (raw) => {
+      const parsed = JSON.parse(raw.toString('utf8'));
+      if (parsed.t === 'ready' || parsed.t === 'hello') { clearTimeout(timer); socket.close(); resolve(parsed); }
+    });
+    socket.on('error', () => { clearTimeout(timer); resolve(null); });
+  });
+  ok('WebSocket upgrade through the web origin', Boolean(frame), frame ? JSON.stringify(frame).slice(0, 80) : 'no ready frame');
+}
+
 console.log(`\n${failures === 0 ? 'ALL WEB API CONTRACT CHECKS PASSED' : failures + ' CHECK(S) FAILED'}\n`);
 process.exit(failures === 0 ? 0 : 1);

@@ -20,7 +20,7 @@
     "db:migrate": "npm run db:migrate -w @sovereign/server",
     "db:reset": "npm run db:reset -w @sovereign/server",
     "dev:server": "npm run dev -w @sovereign/server",
-    "dev:web": "npm run dev -w @sovereign/web",
+    "dev:web": "PORT=3000 API_URL=http://localhost:8787 npm run dev -w @sovereign/web",
     "dev": "concurrently -n api,web -c cyan,magenta \"npm:dev:server\" \"npm:dev:web\"",
     "build": "npm run build -w @sovereign/server && npm run build -w @sovereign/web",
     "typecheck": "npm run typecheck -w @sovereign/server && npm run typecheck -w @sovereign/web && npm run typecheck -w @sovereign/mobile",
