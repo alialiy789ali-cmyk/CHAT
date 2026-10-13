@@ -102,7 +102,7 @@ export function ChatListScreen({ onOpenConversation }: { onOpenConversation: (co
               borderBottomColor: theme.border,
             })}
           >
-            <Avatar name={item.title ?? 'محادثة'} size={46} />
+            <Avatar name={item.title ?? 'محادثة'} src={item.avatarUrl} size={46} />
             <View style={{ flex: 1, gap: 2 }}>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
                 <Text style={{ color: theme.text, fontWeight: '700', flexShrink: 1 }} numberOfLines={1}>

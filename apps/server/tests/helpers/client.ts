@@ -63,6 +63,22 @@ export class ApiClient {
     return { status: response.status, body: parsed as T, headers: response.headers };
   }
 
+  /**
+   * Fetches bytes without decoding them. `request()` parses bodies as text/JSON, which would
+   * corrupt binary payloads (this is how the media-download assertions verify real content).
+   */
+  async download(
+    path: string,
+    options: { token?: string | null; headers?: Record<string, string> } = {},
+  ): Promise<{ status: number; bytes: Buffer; headers: Headers }> {
+    const headers: Record<string, string> = { ...(options.headers ?? {}) };
+    const token = options.token === undefined ? this.accessToken : options.token;
+    if (token) headers.authorization = `Bearer ${token}`;
+    const response = await fetch(`${this.baseUrl}${path}`, { headers });
+    const buffer = Buffer.from(await response.arrayBuffer());
+    return { status: response.status, bytes: buffer, headers: response.headers };
+  }
+
   async register(input?: { username?: string; email?: string; password?: string; displayName?: string }) {
     const username = input?.username ?? uniqueUsername();
     const email = input?.email ?? uniqueEmail(username);

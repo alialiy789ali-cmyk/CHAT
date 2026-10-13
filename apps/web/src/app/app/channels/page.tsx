@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '@/lib/api';
+import { MediaGrid } from '@/components/media';
 import { Avatar, Badge, Button, EmptyState, Field, Modal, Spinner, formatTime } from '@/components/ui';
 import { useSession } from '@/lib/session';
 import { useT } from '@/lib/i18n';
@@ -307,16 +308,7 @@ export default function ChannelsPage() {
                       )}
                     </div>
                     {post.body && <p className="whitespace-pre-wrap break-words">{post.body}</p>}
-                    {post.media.map((item) =>
-                      item.mimeType.startsWith('image/') ? (
-                        // eslint-disable-next-line @next/next/no-img-element
-                        <img key={item.id} src={item.url} alt={item.fileName} className="max-h-80 rounded-xl" loading="lazy" />
-                      ) : (
-                        <a key={item.id} href={item.url} target="_blank" rel="noreferrer" className="pill">
-                          📎 {item.fileName}
-                        </a>
-                      ),
-                    )}
+                    <MediaGrid items={post.media} maxHeight={320} />
                   </article>
                 ))
               )}

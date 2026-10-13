@@ -1,10 +1,21 @@
-import { ActivityIndicator, Pressable, StyleSheet, Text, TextInput, View, type TextInputProps, type ViewStyle } from 'react-native';
+import { ActivityIndicator, Image, Pressable, StyleSheet, Text, TextInput, View, type TextInputProps, type ViewStyle } from 'react-native';
+import { api } from '../lib/api';
 import { spacing, typography, useTheme, type Theme } from '../lib/theme';
 
 /** Minimal, accessible primitives shared by every screen (RTL-safe). */
 
-export function Avatar({ name, size = 40 }: { name: string; size?: number }) {
+export function Avatar({ name, size = 40, src }: { name: string; size?: number; src?: string | null }) {
   const theme = useTheme();
+  const source = api.mediaSource(src);
+  if (source) {
+    return (
+      <Image
+        source={source}
+        accessibilityLabel={name}
+        style={{ width: size, height: size, borderRadius: size / 2, backgroundColor: theme.surfaceSunken }}
+      />
+    );
+  }
   const initials = name
     .split(/\s+/)
     .slice(0, 2)
@@ -18,7 +29,9 @@ export function Avatar({ name, size = 40 }: { name: string; size?: number }) {
         { width: size, height: size, borderRadius: size / 2, backgroundColor: theme.accent + '22' },
       ]}
     >
-      <Text style={{ color: theme.accent, fontWeight: '700', fontSize: size * 0.4 }}>{initials || '؟'}</Text>
+      <Text style={{ color: theme.accent, fontWeight: '700', fontSize: size * 0.4 }} accessibilityLabel={name}>
+        {initials || '؟'}
+      </Text>
     </View>
   );
 }

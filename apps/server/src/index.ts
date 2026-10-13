@@ -6,13 +6,26 @@ import { loadEnvFile } from './config/index.js';
 /**
  * Server entry point.
  *
+ *   node dist/index.js               # normal API server
+ *   node dist/index.js --migrate-only   # apply migrations and exit (deploy step)
+ *
  * Startup order: env file → runtime (db, migrations, cache, storage, mail) →
  * HTTP app → listen → graceful shutdown on SIGTERM/SIGINT with a drain period.
  */
 
 loadEnvFile('apps/server/.env');
 
+/** Deployments run migrations as a separate step so a bad release cannot boot half-migrated. */
+const migrateOnly = process.argv.includes('--migrate-only');
+
 const runtime = await createRuntime();
+
+if (migrateOnly) {
+  runtime.logger.info('--migrate-only: migrations applied, exiting');
+  await runtime.close();
+  await stopEmbedded();
+  process.exit(0);
+}
 const app = await buildApp({ deps: runtime.deps, container: runtime.container });
 
 let shuttingDown = false;

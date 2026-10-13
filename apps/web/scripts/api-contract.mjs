@@ -115,5 +115,55 @@ console.log('\n[5] realtime through the web proxy');
   ok('WebSocket upgrade through the web origin', Boolean(frame), frame ? JSON.stringify(frame).slice(0, 80) : 'no ready frame');
 }
 
+console.log('\n[6] authenticated media (browser tags cannot send headers)');
+{
+  // Upload a real PNG as layla, then fetch it the way an <img> does: no Authorization header,
+  // only the short-lived media token. This is the exact code path the web UI uses.
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==',
+    'base64',
+  );
+  const form = new FormData();
+  form.append('file', new Blob([new Uint8Array(png)], { type: 'image/png' }), 'contract-media.png');
+  const uploaded = await fetch(`${BASE}/api/files`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${layla}` },
+    body: form,
+  });
+  const uploadBody = await uploaded.json().catch(() => ({}));
+  ok('POST /files (multipart upload)', uploaded.status === 201 && Boolean(uploadBody.attachment?.id), `status=${uploaded.status}`);
+
+  const minted = await call('/api/auth/media-token', { method: 'POST', token: layla, body: {} });
+  ok(
+    'POST /auth/media-token → short-lived read-only token',
+    minted.status === 200 && typeof minted.json?.token === 'string' && minted.json.expiresIn <= 300,
+    `expiresIn=${minted.json?.expiresIn}`,
+  );
+
+  if (uploadBody.attachment?.id && minted.json?.token) {
+    const mediaRes = await fetch(`${BASE}/api/files/${uploadBody.attachment.id}?token=${encodeURIComponent(minted.json.token)}`);
+    const bytes = Buffer.from(await mediaRes.arrayBuffer());
+    ok(
+      'GET /files/:id?token= (no Authorization header)',
+      mediaRes.status === 200 && mediaRes.headers.get('content-type') === 'image/png' && bytes.equals(png),
+      `status=${mediaRes.status} bytes=${bytes.length}`,
+    );
+    const anonymous = await fetch(`${BASE}/api/files/${uploadBody.attachment.id}`);
+    ok('GET /files/:id without credentials → 401', anonymous.status === 401, `status=${anonymous.status}`);
+    const asBearer = await call('/api/users/me', { token: minted.json.token });
+    ok('media token cannot be used as an access token', asBearer.status === 401, `status=${asBearer.status}`);
+  }
+}
+
+console.log('\n[7] cleanup (the script must not leak sessions)');
+{
+  // Each run logs in as the demo user; without this, repeated runs would eventually hit the
+  // 10-active-session cap. Logging out is also the last real behaviour we assert here.
+  const out = await call('/api/auth/logout', { method: 'POST', token: layla });
+  ok('POST /auth/logout', out.status === 200, `status=${out.status}`);
+  const fresh = await call('/api/auth/logout', { method: 'POST', token });
+  ok('registered check user logged out', fresh.status === 200, `status=${fresh.status}`);
+}
+
 console.log(`\n${failures === 0 ? 'ALL WEB API CONTRACT CHECKS PASSED' : failures + ' CHECK(S) FAILED'}\n`);
 process.exit(failures === 0 ? 0 : 1);

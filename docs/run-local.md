@@ -76,8 +76,26 @@ npm run dev
 | `port 54329 already in use` | `npm run db:down` ثم `npm run dev` |
 | الويب يفتح لكن الطلبات تفشل | الخادم غير مشغّل: تأكد من `curl localhost:8787/api/health` |
 | `Connection terminated unexpectedly` | بقايا خادم مدمج قديم: `npm run db:reset` |
+| `403 too_many_sessions` | بلغت سقف الجلسات (10): اخرج من جهاز آخر، أو `npm run db:reset && npm run seed`، أو ارفع `MAX_ACTIVE_SESSIONS` |
 | المكالمات تُعلّق على «يرن…» | الشبكة تحجب UDP: أضف TURN (`RTC_TURN_*`) — بدون TURN قد تعمل P2P على شبكة محلية فقط |
 | البريد لا يصل | في التطوير `MAIL_DRIVER=console` يطبع الرسائل في سجل الخادم، ويُعيد رمز التحقق في الاستجابة |
+
+
+### `403 too_many_sessions` عند تسجيل الدخول
+
+الحساب بلغ سقف الجلسات النشطة (10 افتراضياً). هذا سلوك مقصود، وليس عطلاً:
+
+```bash
+# الخيار 1: أعد بناء قاعدة التطوير (بيانات تجريبية جديدة)
+cd apps/server && npm run db:reset && npm run seed
+
+# الخيار 2: ارفع السقف مؤقتاً للتجارب الثقيلة
+MAX_ACTIVE_SESSIONS=50 npm run dev
+```
+
+ملاحظة تشغيلية: كل `npm run check:api` يسجّل دخولاً واحداً للويب ثم يخرج منه في النهاية
+(قسم `[7] cleanup`)، فلا تتراكم الجلسات بين التشغيلات.
+
 
 ## متغيرات البيئة المهمة
 

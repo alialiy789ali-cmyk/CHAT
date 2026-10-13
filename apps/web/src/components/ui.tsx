@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode } from 'react';
+import { useMediaUrl } from '@/lib/media';
 
 /** Shared, accessible primitives used across the whole client. */
 
@@ -21,12 +22,14 @@ export function Avatar({
     .map((part) => part[0] ?? '')
     .join('')
     .toUpperCase();
+  // Avatars are stored as /api/files/:id, i.e. they need the media token too.
+  const resolvedSrc = useMediaUrl(src);
   return (
     <span className="relative inline-flex shrink-0">
-      {src ? (
+      {resolvedSrc ? (
         // eslint-disable-next-line @next/next/no-img-element
         <img
-          src={src}
+          src={resolvedSrc}
           alt=""
           width={size}
           height={size}

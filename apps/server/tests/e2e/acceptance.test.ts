@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ServerFrame } from '@sovereign/shared/protocol';
 import { e2e } from '../helpers/setup-e2e.js';
-import { ApiClient, PASSWORD, uniqueUsername } from '../helpers/client.js';
+import { ApiClient, PASSWORD, uniqueEmail, uniqueUsername } from '../helpers/client.js';
 
 /**
  * The acceptance criteria from the project brief, executed against the real server
@@ -650,5 +650,116 @@ describe('acceptance criteria', () => {
     await new Promise((resolve) => setTimeout(resolve, 150));
     closed = true;
     expect(closed).toBe(true);
+  });
+  it('19. media tokens authorise browser media reads and nothing else', async () => {
+    const base = e2e().baseUrl;
+    const alice = new ApiClient(base);
+    const bob = new ApiClient(base);
+    await alice.register({ username: uniqueUsername('media') });
+    await bob.register({ username: uniqueUsername('bystander') });
+
+    // A real binary upload (1x1 PNG), exactly what the browser sends.
+    const png = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==',
+      'base64',
+    );
+    const form = new FormData();
+    form.append('file', new Blob([new Uint8Array(png)], { type: 'image/png' }), 'media-token.png');
+    const upload = await alice.request<{ attachment: { id: string } }>('POST', '/api/files', { body: form, raw: true });
+    expect(upload.status).toBe(201);
+    const attachmentId = upload.body.attachment.id;
+
+    // <img> cannot send headers, so the client asks for a short-lived media token.
+    const minted = await alice.request<{ token: string; expiresIn: number }>('POST', '/api/auth/media-token');
+    expect(minted.status).toBe(200);
+    expect(minted.body.expiresIn).toBeLessThanOrEqual(300);
+    expect(minted.body.expiresIn).toBeGreaterThan(0);
+
+    // The URL a browser actually renders: no Authorization header at all.
+    const fetched = await alice.download(`/api/files/${attachmentId}?token=${encodeURIComponent(minted.body.token)}`, { token: null });
+    expect(fetched.status).toBe(200);
+    expect(fetched.headers.get('content-type')).toBe('image/png');
+    expect(fetched.bytes.equals(png)).toBe(true);
+
+    // Same token, other user's file: authorisation is unchanged by the credential type.
+    const bobToken = await bob.request<{ token: string }>('POST', '/api/auth/media-token');
+    const bobOnAliceFile = await bob.download(`/api/files/${attachmentId}?token=${encodeURIComponent(bobToken.body.token)}`, { token: null });
+    expect(bobOnAliceFile.status).toBe(404);
+
+    // No credential at all is still a 401 — media tokens are additive, never a bypass.
+    const anonymous = await alice.download(`/api/files/${attachmentId}`, { token: null });
+    expect(anonymous.status).toBe(401);
+
+    // A media token is read-only and audience-bound: it cannot authenticate an API mutation,
+    // a profile read, or a WebSocket-relevant endpoint.
+    const asBearer = await alice.request('GET', '/api/users/me', { token: minted.body.token });
+    expect(asBearer.status).toBe(401);
+    const mutation = await alice.request('PATCH', '/api/users/me', {
+      body: { displayName: 'Media Token Attempt' },
+      token: minted.body.token,
+    });
+    expect(mutation.status).toBe(401);
+
+    // Query-string credentials are tolerated on GETs (the WebSocket handshake needs them) but
+    // never authorise a write, so a link a user is tricked into opening cannot change data.
+    const getWithQueryToken = await alice.request<{ username: string }>('GET', `/api/users/me?access_token=${encodeURIComponent(alice.token!)}`, {
+      token: null,
+    });
+    expect(getWithQueryToken.status).toBe(200);
+    const mutationWithQueryToken = await alice.request('PATCH', `/api/users/me?access_token=${encodeURIComponent(alice.token!)}`, {
+      body: { displayName: 'Query Token Attempt' },
+      token: null,
+    });
+    expect(mutationWithQueryToken.status).toBe(401);
+
+    // Revoking the session kills media access too (the session is re-checked server side,
+    // cached for a few seconds — so this is asserted with a bounded poll, not a sleep-guess).
+    const logout = await alice.request('POST', '/api/auth/logout');
+    expect(logout.status).toBe(200);
+    const deadline = Date.now() + 15_000;
+    let revokedStatus = 200;
+    while (Date.now() < deadline) {
+      const attempt = await alice.download(`/api/files/${attachmentId}?token=${encodeURIComponent(minted.body.token)}`, { token: null });
+      revokedStatus = attempt.status;
+      if (revokedStatus === 401) break;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    expect(revokedStatus).toBe(401);
+  });
+  it('20. concurrent sessions are capped, and freeing one restores access', async () => {
+    const base = e2e().baseUrl;
+    const user = new ApiClient(base);
+    const email = uniqueEmail('sessioncap');
+    await user.register({ username: uniqueUsername('cap'), email });
+
+    // Registering already created session #1; open nine more devices (the documented cap is 10).
+    const extraClients: ApiClient[] = [];
+    for (let index = 0; index < 9; index += 1) {
+      const client = new ApiClient(base);
+      const result = await client.login(email, PASSWORD);
+      expect(result.user.id).toBe(user.userId);
+      extraClients.push(client);
+    }
+
+    // The 11th device is refused rather than silently evicting a live session.
+    const eleventh = new ApiClient(base);
+    const refused = await eleventh.request<{ error: { code: string } }>('POST', '/api/auth/login', {
+      body: { identifier: email, password: PASSWORD, device: { name: 'Device 11', platform: 'web' } },
+      token: null,
+    });
+    expect(refused.status).toBe(403);
+    expect((refused.body as { error: { code: string } }).error.code).toBe('too_many_sessions');
+
+    // Signing out on one device frees the slot, and the account is usable again.
+    const signOut = await extraClients[0]!.request('POST', '/api/auth/logout');
+    expect(signOut.status).toBe(200);
+    const twelfth = new ApiClient(base);
+    const allowed = await twelfth.login(email, PASSWORD);
+    expect(allowed.user.id).toBe(user.userId);
+
+    // Logout-all revokes everything, which also clears the cap for future logins.
+    const revoked = await twelfth.request<{ revokedSessions: number }>('POST', '/api/auth/logout-all');
+    expect(revoked.status).toBe(200);
+    expect(revoked.body.revokedSessions).toBeGreaterThanOrEqual(10);
   });
 });

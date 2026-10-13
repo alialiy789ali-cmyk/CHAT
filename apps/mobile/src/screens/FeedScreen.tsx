@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, FlatList, Pressable, RefreshControl, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, FlatList, Image, Pressable, RefreshControl, Text, TextInput, View } from 'react-native';
 import { api } from '../lib/api';
 import { useSession } from '../lib/session';
 import { Avatar, Badge, Button, Card, ConnectionBanner, EmptyState } from '../components/ui';
@@ -10,7 +10,7 @@ interface Post {
   author: { id: string; username: string; displayName: string; avatarUrl: string | null };
   body: string | null;
   visibility: 'public' | 'followers' | 'private';
-  media: Array<{ id: string; url: string; mimeType: string; fileName: string }>;
+  media: Array<{ id: string; url: string; mimeType: string; fileName: string; width?: number | null; height?: number | null }>;
   counts: { likes: number; comments: number; reposts: number };
   viewer: { liked: boolean; reposted: boolean; following: boolean; isMine: boolean };
   createdAt: string;
@@ -149,7 +149,7 @@ export function FeedScreen() {
           renderItem={({ item }) => (
             <Card style={{ margin: spacing.md, marginBottom: 0 }}>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.sm }}>
-                <Avatar name={item.author.displayName} size={38} />
+                <Avatar name={item.author.displayName} src={item.author.avatarUrl} size={38} />
                 <View style={{ flex: 1 }}>
                   <Text style={{ color: theme.text, fontWeight: '700' }} numberOfLines={1}>
                     {item.author.displayName}
@@ -163,9 +163,23 @@ export function FeedScreen() {
 
               {item.body ? <Text style={{ color: theme.text }}>{item.body}</Text> : null}
               {item.media.length > 0 ? (
-                <Text style={{ color: theme.textMuted, fontSize: typography.caption.fontSize }}>
-                  🖼 {item.media.length} مرفق (افتح التفاصيل لعرض الصور)
-                </Text>
+                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs }}>
+                  {item.media.slice(0, 4).map((media) =>
+                    media.mimeType.startsWith('image/') ? (
+                      <Image
+                        key={media.id}
+                        source={api.mediaSource(media.url)}
+                        accessibilityLabel={media.fileName}
+                        style={{ width: 140, height: 140, borderRadius: 12 }}
+                        resizeMode="cover"
+                      />
+                    ) : (
+                      <Text key={media.id} style={{ color: theme.textMuted, fontSize: typography.caption.fontSize }}>
+                        📎 {media.fileName}
+                      </Text>
+                    ),
+                  )}
+                </View>
               ) : null}
 
               <View style={{ flexDirection: 'row', gap: spacing.sm, alignItems: 'center' }}>

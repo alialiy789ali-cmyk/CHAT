@@ -6,6 +6,8 @@
 #   infra/scripts/restore.sh <db-....dump[.gpg]>          # restore database
 #   infra/scripts/restore.sh --storage <storage-....tar.gz> [DEST_DIR]
 #
+# You must confirm by typing RESTORE (or set RESTORE_CONFIRM=RESTORE for an automated drill).
+#
 # Environment: COMPOSE_FILE, GPG_RECIPIENT (to decrypt .gpg archives), DEST_DIR for storage
 # ============================================================================
 set -euo pipefail
@@ -19,8 +21,29 @@ log() { printf '[restore] %s\n' "$*"; }
 dc() { docker compose -f "$COMPOSE_FILE" "$@"; }
 
 usage() {
-  sed -n '2,10p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   exit 1
+}
+
+# Restoring overwrites live data, so it must be deliberate. In an automated drill set
+# RESTORE_CONFIRM=RESTORE (documented in docs/backup-restore.md) — never guess it.
+confirm_restore() {
+  if [[ "${RESTORE_CONFIRM:-}" == "RESTORE" ]]; then
+    log "confirmation accepted from RESTORE_CONFIRM (non-interactive)"
+    return 0
+  fi
+  if [[ ! -t 0 ]]; then
+    log "ERROR: refusing to restore without confirmation."
+    log "       Run interactively and type RESTORE, or set RESTORE_CONFIRM=RESTORE for automation."
+    exit 1
+  fi
+  printf '[restore] This OVERWRITES the live database. Type RESTORE to continue: '
+  local answer
+  read -r answer
+  if [[ "$answer" != "RESTORE" ]]; then
+    log "aborted — nothing was changed"
+    exit 1
+  fi
 }
 
 decrypt_if_needed() {
@@ -52,6 +75,7 @@ restore_database() {
   verify_checksum "$archive"
   [[ -s "$archive" ]] || { log "ERROR: archive is empty"; exit 1; }
 
+  confirm_restore
   log "stopping api and web so nothing writes during the restore"
   dc stop api web || true
 
@@ -63,6 +87,7 @@ restore_database() {
   local safety="/tmp/pre-restore-$STAMP.dump"
   log "saving current state to $safety (inside the postgres container)"
   dc exec -T postgres pg_dump -U "$db_user" -d "$db_name" --format=custom --no-owner > "$safety"
+  [[ -s "$safety" ]] || { log "ERROR: pre-restore safety dump is empty — aborting before touching live data"; exit 1; }
 
   log "restoring $archive into $db_name"
   dc exec -T postgres psql -U "$db_user" -d postgres -c \
@@ -87,6 +112,7 @@ restore_storage() {
   local archive
   archive="$(decrypt_if_needed "$1")"
   verify_checksum "$archive"
+  confirm_restore
   log "restoring object storage into $STORAGE_TARGET"
   mkdir -p "$STORAGE_TARGET"
   tar -xzf "$archive" -C "$(dirname "$STORAGE_TARGET")" --strip-components=1 2>/dev/null || tar -xzf "$archive" -C "$STORAGE_TARGET"

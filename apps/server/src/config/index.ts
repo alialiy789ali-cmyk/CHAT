@@ -68,6 +68,12 @@ const envSchema = z.object({
 
   // ---------------------------------------------------------------- auth
   ACCESS_TOKEN_TTL_SECONDS: z.coerce.number().int().default(900),
+  /**
+   * Media tokens authorise *reads of one already-authorised file* for `<img>`/`<video>` tags,
+   * which cannot send an Authorization header. Kept very short because the token travels in
+   * the query string (and therefore into server logs).
+   */
+  MEDIA_TOKEN_TTL_SECONDS: z.coerce.number().int().min(30).max(3600).default(300),
   REFRESH_TOKEN_TTL_SECONDS: z.coerce.number().int().default(60 * 60 * 24 * 30),
   /** Comma separated emails that are promoted to admin on registration (bootstrap). */
   ADMIN_EMAILS: z.string().default(''),

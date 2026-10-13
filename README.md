@@ -50,7 +50,7 @@ npm run seed                # بيانات تجريبية + حسابات للد�
 ```bash
 npm run test:all            # 26 اختبار وحدة + 14 اختبار قبول شامل
 npm run smoke               # فحص شامل ضد خادم يعمل فعلاً
-npm run check:api           # 35 فحصاً لعقود الواجهة (REST + WebSocket) بين الويب والخادم
+npm run check:api           # 42 فحصاً لعقود الواجهة (REST + WebSocket + الوسائط) بين الويب والخادم
 npm run typecheck           # فحص الأنواع في الخادم والویب
 ```
 

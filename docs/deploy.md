@@ -69,7 +69,8 @@ curl -fsS https://chat.example.com/api/health | head
 ويمكن تشغيلها يدوياً:
 
 ```bash
-docker compose -f infra/docker-compose.yml exec api node dist/index.js --migrate-only 2>/dev/null || true
+# مُنفَّذ ومُختبَر محلياً: يطبّق الهجرات ثم يخرج بكود 0 دون فتح منفذ
+docker compose -f infra/docker-compose.yml exec api node dist/index.js --migrate-only
 ```
 
 ### إعداد TURN للاتصال خلف شبكات مقيّدة

@@ -18,7 +18,9 @@
 | POST | `/auth/login` | `{identifier, password, totp?, device?}` → نفس الشكل. `totp_required` عند تفعيل التحقق بخطوتين |
 | POST | `/auth/refresh` | يقرأ الكوكي أو `{refreshToken}` → رموز جديدة (تدوير إلزامي) |
 | POST | `/auth/logout` \| `/auth/logout-all` | إلغاء الجلسة الحالية / كل الجلسات |
+| — | — | ملاحظة: عند بلوغ `MAX_ACTIVE_SESSIONS` (10 افتراضياً) يفشل الدخول بـ403 `too_many_sessions` بدل إسقاط جلسة قائمة |
 | POST | `/auth/realtime-ticket` | → `{ticket, expiresIn}` — صلاحية 90 ثانية لفتح `/ws` |
+| POST | `/auth/media-token` | → `{token, expiresIn: 300}` — رمز **قراءة فقط** لوسوم `<img>/<video>` (انظر «الملفات» أدناه) |
 | GET | `/auth/sessions` | قائمة الجلسات مع `current: true/false` |
 | DELETE | `/auth/sessions/:sessionId` | إلغاء جلسة محدّدة |
 | POST | `/auth/verify-email` \| `/auth/resend-verification` | تأكيد البريد |
@@ -68,9 +70,20 @@
 | الطريقة | المسار | الوصف |
 | --- | --- | --- |
 | POST | `/files` | multipart (`file`, وحقل `durationMs` اختياري للرسائل الصوتية) → `{attachment}` |
-| GET | `/files/:attachmentId` | يُخدم بمصادقة وبعد التحقق من العضوية؛ ترويسات `nosniff` و`CSP: sandbox` |
-| DELETE | `/files/:attachmentId` | حذف (المالك) |
+| GET | `/files/:attachmentId` | ثلاثة أشكال للمصادقة (كلها تخضع لنفس فحص العضوية والجلسة): `Authorization: Bearer <access>`, أو `?token=<media token>`, أو `?access_token=<access>` على GET فقط. ترويسات `nosniff` و`CSP: sandbox` + `private, max-age=3600` |
+| DELETE | `/files/:attachmentId` | حذف (المالك) — يتطلب ترويسة `Authorization` (لا رموز وسائط) |
 | GET | `/files/allowed-types` \| `/files/usage` | الأنواع المسموحة والاستهلاك |
+
+**لماذا يوجد رمز وسائط منفصل؟** المتصفح لا يستطيع إرسال ترويسة `Authorization` مع `<img>` أو
+`<video>` أو رابط تنزيل، ووضع رمز الوصول (15 دقيقة، يصلح لكل الـAPI) في سلسلة استعلام يسرّبه
+إلى سجلات الخادم. لذلك:
+
+1. العميل يطلب `POST /api/auth/media-token` ← JWT بخمس دقائق، جمهور `sovereign-media`،
+   و`scope: files:read` فقط.
+2. يبني `<img src="/api/files/<id>?token=<media>">` (الويب يفعل ذلك تلقائياً في `lib/media.ts`
+   ويجدّده قبل انتهائه؛ الجوال يرسل الترويسة مباشرة عبر `api.mediaSource()` لأنه يستطيع ذلك).
+3. الخادم يتحقق من الرمز **ومن الجلسة** في كل طلب؛ إلغاء الجلسة يُبطل الرموز الممنوحة خلال ثوانٍ.
+4. رمز الوسائط لا يصلح لأي نقطة نهاية أخرى (مُختبر: `GET /api/users/me` برمز وسائط → 401).
 | GET | `/uploads/pending` | مرفقات لم تُربط برسالة (تنظيف) |
 
 الحدود: 50MB افتراضياً، فحص نوع حقيقي (magic bytes) وحجب الأنواع التنفيذية، وتجزئة SHA-256 لمنع

@@ -71,6 +71,27 @@ export async function registerAuthRoutes(app: FastifyInstance, container: Servic
     },
   );
 
+  /**
+   * Mints a short-lived, read-only media token for `<img>`, `<video>` and download links —
+   * browsers cannot attach an Authorization header to those. It never rotates the refresh
+   * token (unlike /auth/refresh) and never grants write access.
+   */
+  app.post(
+    '/auth/media-token',
+    {
+      preHandler: [app.authenticate],
+      config: { rateLimit: limit(240, '5 minutes') },
+      schema: { tags: ['auth'] },
+    },
+    async (request) => {
+      const issued = await deps.tokens.issueMediaToken({
+        userId: request.auth!.userId,
+        sessionId: request.auth!.sessionId,
+      });
+      return { token: issued.token, expiresIn: Math.max(1, Math.floor((issued.expiresAt.getTime() - Date.now()) / 1000)) };
+    },
+  );
+
   app.post(
     '/auth/login',
     { config: { rateLimit: limit(20, '5 minutes') }, schema: { tags: ['auth'] } },

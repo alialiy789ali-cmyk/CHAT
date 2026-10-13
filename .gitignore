@@ -28,3 +28,9 @@ infra/nginx/certs/
 .idea/
 .vscode/*
 !.vscode/extensions.json
+
+# Backup archives and TLS material must never enter the repository.
+infra/backups/*
+!infra/backups/README.md
+infra/nginx/certs/*
+!infra/nginx/certs/README.md

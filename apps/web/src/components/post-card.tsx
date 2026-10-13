@@ -4,6 +4,7 @@ import { useState } from 'react';
 import Link from 'next/link';
 import { api } from '@/lib/api';
 import { Avatar, Badge, Button, formatTime } from '@/components/ui';
+import { MediaGrid } from '@/components/media';
 import { useT } from '@/lib/i18n';
 import type { Post } from '@/components/post';
 
@@ -132,22 +133,7 @@ export function PostCard({
 
           {display.body && <p className="mt-1 whitespace-pre-wrap break-words">{linkify(display.body)}</p>}
 
-          {post.media.length > 0 && (
-            <div className="mt-2 grid gap-2 sm:grid-cols-2">
-              {post.media.map((item) =>
-                item.mimeType.startsWith('image/') ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img key={item.id} src={item.url} alt={item.fileName} className="max-h-72 rounded-xl object-cover" loading="lazy" />
-                ) : item.mimeType.startsWith('video/') ? (
-                  <video key={item.id} src={item.url} controls className="max-h-72 rounded-xl" preload="metadata" />
-                ) : (
-                  <a key={item.id} href={item.url} target="_blank" rel="noreferrer" className="pill">
-                    📎 {item.fileName}
-                  </a>
-                ),
-              )}
-            </div>
-          )}
+          <MediaGrid items={post.media} />
 
           {post.quoteOfId && !post.repostOf && (
             <p className="muted mt-2 text-xs">منشور مقتبس · <Link className="underline" href={`/app/post/${post.quoteOfId}`}>{post.quoteOfId.slice(0, 8)}…</Link></p>

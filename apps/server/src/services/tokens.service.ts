@@ -1,4 +1,4 @@
-import { SignJWT, jwtVerify, type JWTPayload } from 'jose';
+import { errors as joseErrors, SignJWT, jwtVerify, type JWTPayload } from 'jose';
 import type { AppConfig } from '../config/index.js';
 import { AppError } from '../lib/errors.js';
 import { randomToken, sha256Hex } from '../lib/crypto.js';
@@ -31,6 +31,14 @@ export interface TicketClaims extends JWTPayload {
   typ: 'ws';
 }
 
+export interface MediaTokenClaims extends JWTPayload {
+  sub: string;
+  sid: string;
+  typ: 'media';
+  /** Media tokens are read-only: the file route is the only consumer. */
+  scope: 'files:read';
+}
+
 export interface IssuedTokens {
   accessToken: string;
   refreshToken: string;
@@ -44,8 +52,57 @@ function key(secret: string) {
   return encoder.encode(secret);
 }
 
+/**
+ * jose reports expiry as `JWTExpired` whose *message* does not contain the word "expired"
+ * ("\"exp\" claim timestamp check failed"), so class/code inspection is the reliable test.
+ * Clients branch on `token_expired` to refresh and retry; getting this wrong made every
+ * expired token look like a malformed one.
+ */
+function isExpiredError(err: unknown): boolean {
+  return (
+    err instanceof joseErrors.JWTExpired ||
+    (typeof err === 'object' && err !== null && (err as { code?: string }).code === 'ERR_JWT_EXPIRED')
+  );
+}
+
 export class TokenService {
   constructor(private readonly cfg: AppConfig) {}
+
+  /**
+   * A media token grants read access to files the user is already allowed to read, for a
+   * very short window. It exists because browsers cannot attach headers to `<img>`, `<video>`
+   * or `<a download>` requests; the API therefore accepts it as `?token=` on GET /files/:id
+   * *only*. Session revocation still applies (the session id is re-checked server side).
+   */
+  async issueMediaToken(input: { userId: string; sessionId: string }): Promise<{ token: string; expiresAt: Date }> {
+    const expiresAt = new Date(Date.now() + this.cfg.MEDIA_TOKEN_TTL_SECONDS * 1000);
+    const token = await new SignJWT({ sid: input.sessionId, typ: 'media', scope: 'files:read' })
+      .setProtectedHeader({ alg: 'HS256', typ: 'JWT' })
+      .setSubject(input.userId)
+      .setIssuer('sovereign')
+      .setAudience('sovereign-media')
+      .setIssuedAt()
+      .setExpirationTime(Math.floor(expiresAt.getTime() / 1000))
+      .sign(key(this.cfg.secrets.accessTokenSecret));
+    return { token, expiresAt };
+  }
+
+  async verifyMediaToken(token: string): Promise<MediaTokenClaims> {
+    try {
+      const { payload } = await jwtVerify(token, key(this.cfg.secrets.accessTokenSecret), {
+        issuer: 'sovereign',
+        audience: 'sovereign-media',
+      });
+      if (payload.typ !== 'media' || payload.scope !== 'files:read' || typeof payload.sub !== 'string' || typeof payload.sid !== 'string') {
+        throw new AppError('invalid_token', 'malformed_media_token');
+      }
+      return payload as MediaTokenClaims;
+    } catch (err) {
+      if (err instanceof AppError) throw err;
+      if (isExpiredError(err)) throw new AppError('token_expired', 'media_token_expired');
+      throw new AppError('invalid_token', 'media_token_invalid');
+    }
+  }
 
   async issueAccessToken(input: { userId: string; sessionId: string; role: string }): Promise<{
     token: string;
@@ -75,8 +132,7 @@ export class TokenService {
       return payload as AccessTokenClaims;
     } catch (err) {
       if (err instanceof AppError) throw err;
-      const message = (err as Error).message ?? '';
-      if (message.includes('expired')) throw new AppError('token_expired', 'access_token_expired');
+      if (isExpiredError(err)) throw new AppError('token_expired', 'access_token_expired');
       throw new AppError('invalid_token', 'access_token_invalid');
     }
   }

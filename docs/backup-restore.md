@@ -59,7 +59,8 @@ curl -fsS https://chat.example.com/api/health
 docker compose -f infra/docker-compose.yml exec api npm run smoke --silent
 ```
 
-`restore.sh` يطلب تأكيداً كتابياً (`RESTORE`) لمنع الحذف بالخطأ، ويأخذ نسخة أمان من الحالة
+`restore.sh` يطلب تأكيداً كتابياً (`RESTORE`) لمنع الحذف بالخطأ — اكتب الكلمة تفاعلياً، أو
+استخدم `RESTORE_CONFIRM=RESTORE` في تدريب آلي موثّق — ويأخذ نسخة أمان من الحالة
 الحالية قبل الكتابة (`pre-restore-<timestamp>.dump`).
 
 ## 3) استعادة انتقائية (بلا توقف كامل)

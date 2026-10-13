@@ -141,6 +141,31 @@ class ApiClient {
     return this.request<T>(path, { method: 'DELETE' });
   }
 
+  /**
+   * Absolute URL for a server path (`/api/files/:id` → `http://host:8787/api/files/:id`).
+   * React Native has no same-origin concept, so every URL the API returns relative must be
+   * resolved against the configured server before an <Image> can use it.
+   */
+  absoluteUrl(path: string): string {
+    if (/^https?:\/\//.test(path)) return path;
+    return `${API_URL}${path.startsWith('/') ? '' : '/'}${path}`;
+  }
+
+  /**
+   * Source object for React Native <Image>/<Video> with the access token attached.
+   * Unlike a browser `<img>`, a native image request *can* carry headers — so no media token
+   * or query-string credential is needed on mobile.
+   */
+  mediaSource(path: string | null | undefined): { uri: string; headers?: Record<string, string> } | undefined {
+    if (!path) return undefined;
+    const uri = this.absoluteUrl(path);
+    return this.accessToken ? { uri, headers: { authorization: `Bearer ${this.accessToken}` } } : { uri };
+  }
+
+  getAccessToken(): string | null {
+    return this.accessToken;
+  }
+
   /** Uploads a local file (from expo-image-picker / expo-audio) as multipart. */
   async upload<T>(path: string, file: { uri: string; name: string; type: string }): Promise<T> {
     const form = new FormData();

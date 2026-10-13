@@ -48,7 +48,14 @@ export async function registerFileRoutes(app: FastifyInstance, container: Servic
     return { attachment };
   });
 
-  app.get('/files/:attachmentId', { preHandler: [app.authenticate], schema: { tags: ['files'] } }, async (request, reply) => {
+  /**
+   * Downloads accept three credentials, all session-checked:
+   *   1. `Authorization: Bearer <access token>` — API clients and the mobile app.
+   *   2. `?token=<media token>`                  — <img>/<video>/<a download> in the browser.
+   *   3. `?access_token=<access token>`          — GET-only fallback for same-origin tags.
+   * Authorisation is unchanged in every case: the file must be visible to the caller.
+   */
+  app.get('/files/:attachmentId', { preHandler: [app.authenticateMedia], schema: { tags: ['files'] } }, async (request, reply) => {
     const { attachmentId } = request.params as { attachmentId: string };
     const file = await uploads.download(attachmentId, request.auth!.userId);
 

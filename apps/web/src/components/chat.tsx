@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '@/lib/api';
 import { realtime, newClientMessageId, newRequestId } from '@/lib/realtime';
+import { AttachmentView } from '@/components/media';
 import { Avatar, Badge, Button, EmptyState, Spinner, formatTime } from '@/components/ui';
 import { useT } from '@/lib/i18n';
 import type { ServerFrame } from '@sovereign/shared/protocol';
@@ -108,42 +109,9 @@ export function ConversationList({
 
 /* ------------------------------------------------------------------ thread */
 
-function AttachmentView({ attachment }: { attachment: ChatMessage['attachments'][number] }) {
-  const isImage = attachment.mimeType.startsWith('image/');
-  const isVideo = attachment.mimeType.startsWith('video/');
-  const isAudio = attachment.mimeType.startsWith('audio/');
-  if (isImage) {
-    return (
-      // eslint-disable-next-line @next/next/no-img-element
-      <img
-        src={attachment.url}
-        alt={attachment.fileName}
-        className="max-h-72 w-auto rounded-xl"
-        loading="lazy"
-        width={attachment.width ?? undefined}
-        height={attachment.height ?? undefined}
-      />
-    );
-  }
-  if (isVideo) {
-    return <video src={attachment.url} controls className="max-h-72 rounded-xl" preload="metadata" />;
-  }
-  if (isAudio) {
-    return <audio src={attachment.url} controls className="w-64" preload="metadata" />;
-  }
-  return (
-    <a
-      href={attachment.url}
-      target="_blank"
-      rel="noreferrer"
-      className="flex items-center gap-2 rounded-xl border p-2 text-sm underline"
-      style={{ borderColor: 'currentColor' }}
-    >
-      📎 {attachment.fileName}
-      <span className="opacity-70">({Math.max(1, Math.round(attachment.sizeBytes / 1024))} KB)</span>
-    </a>
-  );
-}
+// Attachment rendering (images/video/audio/downloads) lives in components/media.tsx so the
+// chat, posts and channels all resolve the same authenticated URLs.
+
 
 export function MessageThread({
   messages,

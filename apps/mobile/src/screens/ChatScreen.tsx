@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, FlatList, KeyboardAvoidingView, Platform, Pressable, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, FlatList, Image, KeyboardAvoidingView, Platform, Pressable, Text, TextInput, View } from 'react-native';
 import { api } from '../lib/api';
 import { newClientMessageId, newRequestId, realtime } from '../lib/realtime';
 import { useSession } from '../lib/session';
@@ -18,7 +18,7 @@ interface Message {
   deletedAt: string | null;
   state: 'sent' | 'delivered' | 'read';
   sender: { id: string; username: string; displayName: string; avatarUrl: string | null } | null;
-  attachments: Array<{ id: string; url: string; mimeType: string; fileName: string }>;
+  attachments: Array<{ id: string; url: string; mimeType: string; fileName: string; width?: number | null; height?: number | null }>;
 }
 
 /**
@@ -172,7 +172,7 @@ export function ChatScreen({ conversation, onBack }: { conversation: Conversatio
         <Pressable onPress={onBack} accessibilityLabel="رجوع">
           <Text style={{ color: theme.accent, fontSize: 20 }}>←</Text>
         </Pressable>
-        <Avatar name={conversation.title ?? 'محادثة'} size={38} />
+        <Avatar name={conversation.title ?? 'محادثة'} src={conversation.avatarUrl} size={38} />
         <View style={{ flex: 1 }}>
           <Text style={{ color: theme.text, fontWeight: '700' }} numberOfLines={1}>
             {conversation.title ?? 'محادثة'}
@@ -215,10 +215,23 @@ export function ChatScreen({ conversation, onBack }: { conversation: Conversatio
                   <Text style={{ color: mine ? theme.bubbleOutText : theme.bubbleInText }}>
                     {item.deletedAt ? 'حُذفت هذه الرسالة' : item.body}
                   </Text>
-                  {item.attachments.length > 0 && (
-                    <Text style={{ color: mine ? theme.bubbleOutText : theme.bubbleInText, fontSize: typography.caption.fontSize }}>
-                      📎 {item.attachments.map((a) => a.fileName).join('، ')}
-                    </Text>
+                  {item.attachments.map((attachment) =>
+                    attachment.mimeType.startsWith('image/') ? (
+                      <Image
+                        key={attachment.id}
+                        source={api.mediaSource(attachment.url)}
+                        accessibilityLabel={attachment.fileName}
+                        style={{ width: 200, height: 150, borderRadius: 12, marginTop: spacing.xs }}
+                        resizeMode="cover"
+                      />
+                    ) : (
+                      <Text
+                        key={attachment.id}
+                        style={{ color: mine ? theme.bubbleOutText : theme.bubbleInText, fontSize: typography.caption.fontSize }}
+                      >
+                        📎 {attachment.fileName}
+                      </Text>
+                    ),
                   )}
                 </View>
                 <Text style={{ color: theme.textMuted, fontSize: 10, alignSelf: mine ? 'flex-end' : 'flex-start' }}>

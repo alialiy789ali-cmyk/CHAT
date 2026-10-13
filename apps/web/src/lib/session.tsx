@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { api, ApiError } from './api';
 import { realtime, type ConnectionState } from './realtime';
 import { setLocale, type Locale } from './i18n';
+import { invalidateMediaToken } from '@/lib/media';
 
 /**
  * Session provider: owns authentication state, the realtime connection lifecycle and
@@ -126,6 +127,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const logout = useCallback(async () => {
     await api.logout();
+    // Media URLs carry a token minted for the session we just ended.
+    invalidateMediaToken();
     realtime.close();
     setViewer(null);
     setStatus('anonymous');
