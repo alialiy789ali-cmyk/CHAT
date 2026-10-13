@@ -1,0 +1,37 @@
+{
+  "name": "sovereign-chat",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Sovereign Communication Super App - self-hostable messaging, social network, channels and calls platform",
+  "license": "AGPL-3.0-or-later",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/server",
+    "apps/web"
+  ],
+  "scripts": {
+    "db:up": "npm run db:up -w @sovereign/server",
+    "db:down": "npm run db:down -w @sovereign/server",
+    "db:migrate": "npm run db:migrate -w @sovereign/server",
+    "db:reset": "npm run db:reset -w @sovereign/server",
+    "dev:server": "npm run dev -w @sovereign/server",
+    "dev:web": "npm run dev -w @sovereign/web",
+    "dev": "concurrently -n api,web -c cyan,magenta \"npm:dev:server\" \"npm:dev:web\"",
+    "build": "npm run build -w @sovereign/server && npm run build -w @sovereign/web",
+    "typecheck": "npm run typecheck -w @sovereign/server && npm run typecheck -w @sovereign/web",
+    "test": "npm run test -w @sovereign/server",
+    "test:e2e": "npm run test:e2e -w @sovereign/server",
+    "seed": "npm run seed -w @sovereign/server",
+    "dev:db": "npm run db:up && npm run db:migrate",
+    "smoke": "npm run smoke -w @sovereign/server",
+    "test:all": "npm run test:all -w @sovereign/server",
+    "clean": "rm -rf apps/*/dist packages/*/dist apps/web/.next apps/server/var/pgdata"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}
