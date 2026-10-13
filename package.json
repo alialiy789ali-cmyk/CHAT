@@ -29,7 +29,8 @@
     "dev:db": "npm run db:up && npm run db:migrate",
     "smoke": "npm run smoke -w @sovereign/server",
     "test:all": "npm run test:all -w @sovereign/server",
-    "clean": "rm -rf apps/*/dist packages/*/dist apps/web/.next apps/server/var/pgdata"
+    "clean": "rm -rf apps/*/dist packages/*/dist apps/web/.next apps/server/var/pgdata",
+    "check:api": "npm run check:api -w @sovereign/web"
   },
   "devDependencies": {
     "concurrently": "^9.2.1"
