@@ -293,6 +293,7 @@ export function Composer({
 }) {
   const tr = useT();
   const attachmentsLocked = encrypted;
+  const [staleDeviceNotice, setStaleDeviceNotice] = useState(0);
   const [text, setText] = useState('');
   const [uploading, setUploading] = useState(false);
   const [attachments, setAttachments] = useState<ChatMessage['attachments']>([]);
@@ -334,11 +335,17 @@ export function Composer({
       onCancelReply();
       try {
         const status = await engine.conversationStatus(conversationId);
-        const { envelopes, skipped } = await engine.encryptForConversation(status, plaintextBody);
+        const { envelopes, skipped, unreachable } = await engine.encryptForConversation(status, plaintextBody);
         if (skipped.length > 0 || envelopes.length === 0) {
           setText(plaintextBody);
           alert(`${tr('e2eeBlocked')} (${skipped.map((entry) => entry.reason).join(', ') || 'no_devices'})`);
           return;
+        }
+        if (unreachable.length > 0) {
+          // A device that stopped answering must not freeze the conversation, but the user should
+          // know some of their own devices will not show this message.
+          console.warn('[e2ee] could not address every device', unreachable);
+          setStaleDeviceNotice(unreachable.length);
         }
         const result = await api.post<{ message: ChatMessage; duplicated: boolean }>(
           `/api/conversations/${conversationId}/messages`,
@@ -453,6 +460,11 @@ export function Composer({
         <p className="muted flex items-center gap-1 text-[11px]">
           <span aria-hidden>🔒</span>
           {tr('encrypted')} · {tr('attachmentsNotEncrypted')}
+        </p>
+      )}
+      {staleDeviceNotice > 0 && (
+        <p className="text-[11px]" style={{ color: 'var(--warning, #b45309)' }} role="status">
+          {tr('someDevicesUnreachable')}
         </p>
       )}
       {replyingTo && (

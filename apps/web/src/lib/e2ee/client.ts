@@ -216,6 +216,8 @@ export class OlmDevice {
    */
   verifyBundle(bundle: E2eeDeviceBundle): boolean {
     if (!bundle.signingKey || !bundle.identitySignature) return false;
+    // Verified against the shipped build: `ed25519_verify` lives on an *instance* of Olm.Utility
+    // (`new Utility().ed25519_verify(...)`), not on the class — the static form is undefined.
     const utility = new this.olm.Utility();
     try {
       utility.ed25519_verify(bundle.signingKey, bundle.identityKey, bundle.identitySignature);

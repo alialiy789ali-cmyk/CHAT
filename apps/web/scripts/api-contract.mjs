@@ -13,6 +13,105 @@ const call = async (path, { method = 'GET', token, body, raw } = {}) => {
 };
 const stamp = Date.now().toString(36);
 
+/** Logs in and returns the access token + user id (or null when the account does not exist). */
+const loginAs = async (username, password = 'Sovereign-Demo-2026') => {
+  const res = await call('/api/auth/login', { method: 'POST', body: { identifier: username, password } });
+  if (res.status !== 200 || !res.json?.accessToken) return null;
+  const me = await call('/api/users/me', { token: res.json.accessToken });
+  const sessions = await call('/api/auth/sessions', { token: res.json.accessToken });
+  return {
+    token: res.json.accessToken,
+    userId: me.json?.id,
+    deviceId: sessions.json?.find((entry) => entry.current)?.deviceId,
+  };
+};
+
+/**
+ * A minimal but real Olm client for the contract checks.
+ *
+ * It uses the shipped WASM library — the same code the browser runs — so the keys published here
+ * are genuine and the messages below are genuinely encrypted. Session persistence, the safety
+ * number UI and the React layer are exercised by `npm run test:e2ee -w @sovereign/web`; this
+ * helper exists so the API contract is checked with real crypto rather than filler bytes.
+ */
+const newOlmClient = async (account) => {
+  const imported = await import('@matrix-org/olm');
+  const olm = imported.default ?? imported;
+  await olm.init();
+  const acct = new olm.Account();
+  acct.create();
+  const keys = JSON.parse(acct.identity_keys());
+  const oneTimeKeys = (count) => {
+    acct.generate_one_time_keys(count);
+    return Object.entries(JSON.parse(acct.one_time_keys()).curve25519 ?? {}).map(([id, key]) => ({ id, key }));
+  };
+  const otks = oneTimeKeys(20);
+  const published = await call('/api/keys/identity/olm', {
+    method: 'PUT',
+    token: account.token,
+    body: {
+      deviceId: account.deviceId,
+      identityKey: keys.curve25519,
+      signingKey: keys.ed25519,
+      signature: acct.sign(keys.curve25519),
+      oneTimeKeys: otks,
+    },
+  });
+  acct.mark_keys_as_published();
+  const replenished = await call('/api/keys/prekeys/olm', {
+    method: 'POST',
+    token: account.token,
+    body: { deviceId: account.deviceId, oneTimeKeys: oneTimeKeys(5) },
+  });
+  acct.mark_keys_as_published();
+  const sessions = new Map();
+  return {
+    identityKey: keys.curve25519,
+    deviceId: account.deviceId,
+    published: published.json ?? {},
+    replenished: replenished.json?.oneTimeKeysStored ?? 0,
+    verifyBundle(bundle) {
+      const utility = new olm.Utility();
+      try {
+        utility.ed25519_verify(bundle.signingKey, bundle.identityKey, bundle.identitySignature);
+        return true;
+      } catch {
+        return false;
+      } finally {
+        utility.free();
+      }
+    },
+    encryptFor(bundle, text) {
+      const session = new olm.Session();
+      session.create_outbound(acct, bundle.identityKey, bundle.oneTimePreKey.publicKey);
+      const message = session.encrypt(text);
+      sessions.set(session.session_id(), session);
+      return {
+        payload: { type: message.type, body: message.body },
+        envelope: {
+          deviceId: bundle.deviceId,
+          scheme: 'olm-v1',
+          ciphertext: JSON.stringify({
+            type: message.type,
+            body: message.body,
+            senderIdentityKey: keys.curve25519,
+            senderSigningKey: keys.ed25519,
+          }),
+        },
+      };
+    },
+    decryptFrom(peerIdentityKey, peerDeviceId, ciphertext) {
+      void peerDeviceId;
+      const parsed = JSON.parse(ciphertext);
+      const session = new olm.Session();
+      session.create_inbound_from(acct, peerIdentityKey, parsed.body);
+      const text = session.decrypt(parsed.type, parsed.body);
+      acct.remove_one_time_keys(session);
+      return text;
+    },
+  };
+};
+
 console.log('\n[1] auth through the proxy');
 const reg = await call('/api/auth/register', { method: 'POST', body: { username: `webcheck_${stamp}`, email: `web_${stamp}@example.test`, password: 'Sovereign-Web-2026', displayName: 'فحص الويب', device: { name: 'node', platform: 'web' } } });
 ok('register 201', reg.status === 201, `status=${reg.status} ${reg.raw?.slice(0, 120)}`);
@@ -166,82 +265,103 @@ console.log('\n[6] authenticated media (browser tags cannot send headers)');
   }
 }
 
-console.log('\n[7] end-to-end encryption endpoints (web client contract)');
+console.log('\n[7] end-to-end encryption through the web origin (real Olm)');
 {
-  // The web client publishes an Olm device, asks for a peer bundle, and reads its own envelope.
-  // A stand-in identity is enough here: this section checks the *contract* the UI depends on
-  // (field names, status codes, scoping). Real crypto in the browser is covered by
-  // `npm run test:e2ee -w @sovereign/web`, which drives the actual client modules.
-  const fakeKey = Buffer.alloc(32, 7).toString('base64');
-  const fakeSig = Buffer.alloc(64, 9).toString('base64');
+  // This section drives the **real** Olm library (the same WASM the browser loads) through the
+  // public API: publish devices, enable encryption, send envelopes, decrypt on the other side.
+  // A stand-in key would prove field names but not that the platform works, and the checks below
+  // (envelope scoping, refusals) only mean something against a genuinely encrypted conversation.
+  const alice = await loginAs('cipher_a');
+  const bob = await loginAs('cipher_b');
+  if (!alice || !bob) {
+    ok('seed accounts cipher_a / cipher_b exist (run `npm run seed`)', false);
+  } else {
+    const aliceEngine = await newOlmClient(alice);
+    const bobEngine = await newOlmClient(bob);
 
-  const sessions = await call('/api/auth/sessions', { token });
-  const deviceId = sessions.json?.find?.((entry) => entry.current)?.deviceId;
-  ok('session list exposes the current device id', typeof deviceId === 'string', `deviceId=${deviceId}`);
+    ok('session list exposes the current device id', typeof aliceEngine.deviceId === 'string', `deviceId=${aliceEngine.deviceId}`);
+    ok('PUT /keys/identity/olm 200', aliceEngine.published.algorithm === 'olm-v1', JSON.stringify(aliceEngine.published));
+    ok('POST /keys/prekeys/olm tops the pool up', aliceEngine.replenished > aliceEngine.published.oneTimeKeysStored, `before=${aliceEngine.published.oneTimeKeysStored} after=${aliceEngine.replenished}`);
 
-  const publish = await call('/api/keys/identity/olm', {
-    method: 'PUT',
-    token,
-    body: {
-      deviceId,
-      identityKey: fakeKey,
-      signingKey: fakeKey,
-      signature: fakeSig,
-      oneTimeKeys: [{ id: 'AAAAAA', key: fakeKey }],
-    },
-  });
-  ok('PUT /keys/identity/olm 200', publish.status === 200 && publish.json?.algorithm === 'olm-v1', `status=${publish.status}`);
+    const inventory = await call('/api/keys/me', { token: alice.token });
+    const own = inventory.json?.devices?.find((entry) => entry.deviceId === aliceEngine.deviceId);
+    ok('GET /keys/me reports the Olm device + pool', own?.algorithm === 'olm-v1' && typeof own?.remainingOneTimePreKeys === 'number', JSON.stringify(own));
 
-  const inventory = await call('/api/keys/me', { token });
-  const own = inventory.json?.devices?.find((entry) => entry.deviceId === deviceId);
-  ok('GET /keys/me reports the Olm device + pool', own?.algorithm === 'olm-v1' && typeof own?.remainingOneTimePreKeys === 'number', JSON.stringify(own));
+    const bundle = await call(`/api/keys/${bob.userId}`, { token: alice.token });
+    const bobBundle = bundle.json?.bundles?.find((entry) => entry.deviceId === bobEngine.deviceId);
+    ok('GET /keys/:id returns the peer device bundle', bundle.status === 200 && Boolean(bobBundle), `status=${bundle.status}`);
+    ok('Olm bundle carries signing key + identity signature', Boolean(bobBundle?.signingKey && bobBundle?.identitySignature));
+    ok('the peer bundle signature verifies locally', aliceEngine.verifyBundle(bobBundle) === true);
 
-  const bundle = await call(`/api/keys/${me.json.id}`, { token: layla });
-  const first = bundle.json?.bundles?.[0];
-  ok('GET /keys/:id returns a scheme-tagged bundle', bundle.status === 200 && typeof first?.algorithm === 'string' && typeof first?.identityKey === 'string');
-  ok('Olm bundle carries signing key + signature', Boolean(first?.signingKey && first?.identitySignature) || first?.algorithm === 'libsignal-v1');
+    // Both members must hold keys before a conversation can be switched to encrypted.
+    const conv = await call('/api/conversations/direct', { method: 'POST', token: alice.token, body: { userId: bob.userId } });
+    const convId = conv.json?.conversation?.id;
+    const status = await call(`/api/conversations/${convId}/encryption`, { token: alice.token });
+    ok('encryption status reports every participant ready', status.json?.ready === true, JSON.stringify(status.json?.participants));
+    ok('participants name their algorithms', Array.isArray(status.json?.participants?.[0]?.algorithms));
+    const enabled = await call(`/api/conversations/${convId}/encryption`, { method: 'POST', token: alice.token, body: { enabled: true } });
+    ok('POST /conversations/:id/encryption enables it', enabled.json?.isEncrypted === true, `status=${enabled.status}`);
 
-  const replenish = await call('/api/keys/prekeys/olm', {
-    method: 'POST',
-    token,
-    body: { deviceId, oneTimeKeys: [{ id: 'AAAAAB', key: fakeKey }] },
-  });
-  ok('POST /keys/prekeys/olm tops the pool up', replenish.status === 200 && replenish.json?.oneTimeKeysStored >= 2, `status=${replenish.status}`);
+    // Real handshake: alice's outbound session produces a prekey message for bob's device.
+    const secret = 'فحص العقد: رسالة مشفّرة فعلياً بين جهازين';
+    const encrypted = aliceEngine.encryptFor(bobBundle, secret);
+    ok('first message is a prekey message (type 0)', encrypted.payload.type === 0, encrypted.payload.type);
+    ok('ciphertext contains no plaintext', !encrypted.envelope.ciphertext.includes(secret));
 
-  // Envelope scoping: a ciphertext addressed to a device outside the conversation is refused,
-  // while one addressed to a member device is stored and never echoed back to the sender.
-  const conv = await call('/api/conversations/direct', { method: 'POST', token, body: { userId: laylaMe.json.id } });
-  const convId = conv.json?.conversation?.id;
-  const strangerDevice = '11111111-2222-4333-8444-555555555555';
-  const foreign = await call(`/api/conversations/${convId}/messages`, {
-    method: 'POST',
-    token,
-    body: {
-      clientMessageId: `webcheck-olm-foreign-${stamp}`,
-      body: '',
-      encryptionScheme: 'olm-v1',
-      envelopes: [{ deviceId: strangerDevice, scheme: 'olm-v1', ciphertext: JSON.stringify({ type: 1, body: 'x' }) }],
-    },
-  });
-  ok('envelope for an unknown device is rejected', foreign.status === 400, `status=${foreign.status}`);
+    const strangerDevice = '11111111-2222-4333-8444-555555555555';
+    const foreign = await call(`/api/conversations/${convId}/messages`, {
+      method: 'POST',
+      token: alice.token,
+      body: {
+        clientMessageId: `webcheck-olm-foreign-${stamp}`,
+        body: '',
+        encryptionScheme: 'olm-v1',
+        envelopes: [{ deviceId: strangerDevice, scheme: 'olm-v1', ciphertext: encrypted.envelope.ciphertext }],
+      },
+    });
+    ok('envelope for an unknown device is rejected', foreign.status === 400, `status=${foreign.status}`);
 
-  const stored = await call(`/api/conversations/${convId}/messages`, {
-    method: 'POST',
-    token,
-    body: {
-      clientMessageId: `webcheck-olm-${stamp}`,
-      body: '',
-      encryptionScheme: 'olm-v1',
-      envelopes: [{ deviceId, scheme: 'olm-v1', ciphertext: JSON.stringify({ type: 1, body: 'ciphertext-for-own-device' }) }],
-    },
-  });
-  ok('ciphertext with an empty body is accepted', stored.status === 201 && stored.json?.message?.body === null, `status=${stored.status}`);
-  ok('message DTO carries the scheme', stored.json?.message?.encryptionScheme === 'olm-v1');
-  ok('sender response leaks no envelope', Array.isArray(stored.json?.message?.envelopes) && stored.json.message.envelopes.length === 0);
-  const mine = await call(`/api/messages/${stored.json.message.id}/envelope`, { token });
-  ok('own envelope is returned to the owning device', mine.status === 200 && mine.json?.envelope?.ciphertext?.includes('ciphertext-for-own-device'), JSON.stringify(mine.json)?.slice(0, 120));
-  const notMine = await call(`/api/messages/${stored.json.message.id}/envelope`, { token: layla });
-  ok('the peer device gets no envelope for it', notMine.status === 200 && notMine.json?.envelope === null, JSON.stringify(notMine.json)?.slice(0, 120));
+    const stored = await call(`/api/conversations/${convId}/messages`, {
+      method: 'POST',
+      token: alice.token,
+      body: { clientMessageId: `webcheck-olm-${stamp}`, body: '', encryptionScheme: 'olm-v1', envelopes: [encrypted.envelope] },
+    });
+    ok('ciphertext with an empty body is accepted', stored.status === 201 && stored.json?.message?.body === null, `status=${stored.status}`);
+    ok('message DTO carries the scheme', stored.json?.message?.encryptionScheme === 'olm-v1');
+    ok('the sender response leaks no envelope', Array.isArray(stored.json?.message?.envelopes) && stored.json.message.envelopes.length === 0);
+
+    const plaintextIntoEncrypted = await call(`/api/conversations/${convId}/messages`, {
+      method: 'POST',
+      token: alice.token,
+      body: { clientMessageId: `webcheck-plain-${stamp}`, body: 'نص عادي داخل محادثة مشفّرة' },
+    });
+    ok('plaintext is refused inside an encrypted conversation', plaintextIntoEncrypted.status === 501, `status=${plaintextIntoEncrypted.status}`);
+
+    const history = await call(`/api/conversations/${convId}/messages?limit=5`, { token: bob.token });
+    const row = history.json?.items?.find((item) => item.id === stored.json.message.id);
+    ok("the recipient's device receives its envelope", row?.envelopes?.length === 1 && row?.body === null, JSON.stringify({ env: row?.envelopes?.length, body: row?.body }));
+    const decrypted = bobEngine.decryptFrom(aliceEngine.identityKey, aliceEngine.deviceId, row.envelopes[0].ciphertext);
+    ok('the recipient decrypts the original text', decrypted === secret, decrypted);
+
+    // A second device of the same user (a new login) has no envelope for that message.
+    const bobSecondDevice = await loginAs('cipher_b');
+    const otherDevice = await call(`/api/messages/${stored.json.message.id}/envelope`, { token: bobSecondDevice.token });
+    ok('a different device of the same user gets no envelope', otherDevice.json?.envelope === null, JSON.stringify(otherDevice.json)?.slice(0, 120));
+    const ownerDevice = await call(`/api/messages/${stored.json.message.id}/envelope`, { token: bob.token });
+    ok('the addressed device does get its envelope', ownerDevice.json?.envelope?.ciphertext === encrypted.envelope.ciphertext, JSON.stringify(ownerDevice.json)?.slice(0, 80));
+
+    const search = await call(`/api/messages/search?q=${encodeURIComponent('مشفّرة')}`, { token: bob.token });
+    ok('encrypted messages are invisible to search', Array.isArray(search.json) && !search.json.some((hit) => hit.id === stored.json.message.id));
+
+    const edit = await call(`/api/messages/${stored.json.message.id}`, { method: 'PATCH', token: alice.token, body: { body: 'تعديل' } });
+    ok('editing a ciphertext message is refused', edit.status === 501, `status=${edit.status}`);
+
+    // Leave the demo accounts as they were found: unencrypted, sessions closed.
+    await call(`/api/conversations/${convId}/encryption`, { method: 'POST', token: alice.token, body: { enabled: false } });
+    await call('/api/auth/logout', { method: 'POST', token: alice.token });
+    await call('/api/auth/logout', { method: 'POST', token: bob.token });
+    await call('/api/auth/logout', { method: 'POST', token: bobSecondDevice.token });
+  }
 
   const missing = await call('/api/messages/00000000-0000-4000-8000-000000000000/envelope', { token });
   ok('envelope endpoint 404s for an unknown message', missing.status === 404, `status=${missing.status}`);

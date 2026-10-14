@@ -10,6 +10,19 @@ const nextConfig: NextConfig = {
   poweredByHeader: false,
   output: 'standalone',
   eslint: { ignoreDuringBuilds: true },
+  /**
+   * Matrix Olm ships as an Emscripten UMD bundle that also contains a Node code path, so it
+   * references `fs`, `path` and `crypto`. Those branches never run in a browser — the module is
+   * initialised with `locateFile` pointing at `/olm.wasm` — but webpack still has to resolve the
+   * imports, so they are stubbed out for client bundles.
+   */
+  webpack: (config, { isServer }) => {
+    if (!isServer) {
+      config.resolve = config.resolve ?? {};
+      config.resolve.fallback = { ...(config.resolve.fallback ?? {}), fs: false, path: false, crypto: false };
+    }
+    return config;
+  },
   async headers() {
     return [
       {

@@ -78,6 +78,14 @@ async function main(): Promise<void> {
     displayName: 'مستخدم الاختبار ب',
     bio: 'حساب مخصّص لاختبار التشفير الطرفي.',
   });
+  // `cipher_c` deliberately has **no** key material: it stands for a member who never enabled
+  // encryption, which is the case where sending must be refused rather than silently undelivered.
+  const e2eeC = await ensureUser({
+    username: 'cipher_c',
+    email: 'cipher-c@demo.local',
+    displayName: 'مستخدم الاختبار ج',
+    bio: 'حساب مخصّص لاختبار رفض الإرسال عندما لا توجد مفاتيح.',
+  });
 
   // ---------------------------------------------------------------- social graph
   await deps.repos.social.follow(bob.id, alice.id);
@@ -189,7 +197,7 @@ async function main(): Promise<void> {
 
   logger.info('seed complete');
   console.log('\nDemo accounts (development only):');
-  for (const user of [alice, bob, moderator, e2eeA, e2eeB]) {
+  for (const user of [alice, bob, moderator, e2eeA, e2eeB, e2eeC]) {
     console.log(`  ${user.username.padEnd(10)} ${user.email.padEnd(22)} password: ${DEMO_PASSWORD}`);
   }
   console.log('\nSuggested walkthrough:');

@@ -16,11 +16,24 @@ import 'fake-indexeddb/auto';
 
 import { ApiClient } from '../src/lib/api';
 import { E2eeEngine } from '../src/lib/e2ee/engine';
+import { loadOlm } from '../src/lib/e2ee/client';
 import { parseEnvelope } from '../src/lib/e2ee/types';
 import { safetyNumber, safetyNumberEmoji, deviceFingerprint } from '../src/lib/e2ee/fingerprint';
 import { loadPlaintext, loadSessions } from '../src/lib/e2ee/store';
 
 const BASE = process.env.E2EE_API_URL ?? 'http://127.0.0.1:8787';
+
+/**
+ * Logs into one of the accounts the seed reserves for this test.
+ *
+ * `cipher_c` intentionally never publishes keys — it is the member who cannot receive encrypted
+ * messages, which is what the refusal check below needs.
+ */
+async function loginSeeded(username: string): Promise<ApiClient> {
+  const client = newClient();
+  await client.login(username, 'Sovereign-Demo-2026');
+  return client;
+}
 
 /** Each account gets its own client: two users cannot share one access token. */
 function newClient(): ApiClient {
@@ -252,7 +265,80 @@ async function runChecks(alice: Account, bob: Account): Promise<void> {
   const bobViewOfAlice = await bob.engine.verificationsFor(alice.userId);
   check('verification is per verifier (bob has none recorded)', bobViewOfAlice.every((entry) => !entry.verified));
 
-  console.log('[9] refusals that protect the conversation');
+  console.log('[9] a device that stopped answering cannot freeze the conversation');
+  {
+    // A second device for bob, published with a **single** one-time key and then left alone: the
+    // first bundle fetch consumes that key, so the device becomes unaddressable — exactly what a
+    // phone that was lost or reinstalled looks like to everyone else.
+    const staleClient = await loginSeeded('cipher_b');
+    const staleDeviceId = (await staleClient.get<Array<{ deviceId: string | null; current: boolean }>>('/api/auth/sessions')).find(
+      (session) => session.current,
+    )?.deviceId;
+    // Publish exactly one one-time key, straight through the real library.
+    const olm = await loadOlm();
+    const staleAccount = new olm.Account();
+    staleAccount.create();
+    const staleIdentity = JSON.parse(staleAccount.identity_keys()) as { curve25519: string; ed25519: string };
+    staleAccount.generate_one_time_keys(1);
+    const staleOneTimeKeys = Object.entries(
+      (JSON.parse(staleAccount.one_time_keys()) as { curve25519: Record<string, string> }).curve25519,
+    ).map(([id, key]) => ({ id, key }));
+    await staleClient.put('/api/keys/identity/olm', {
+      deviceId: staleDeviceId,
+      identityKey: staleIdentity.curve25519,
+      signingKey: staleIdentity.ed25519,
+      signature: staleAccount.sign(staleIdentity.curve25519),
+      oneTimeKeys: staleOneTimeKeys,
+    });
+
+    // Two fetches: the first hands out the only key, the second finds the pool empty.
+    await alice.engine.bundlesFor(bob.userId, { fresh: true });
+    await alice.engine.bundlesFor(bob.userId, { fresh: true });
+
+    const staleStatus = await alice.engine.conversationStatus(conversationId);
+    const send = await alice.engine.encryptForConversation(staleStatus, 'a message for the reachable devices');
+    check('the reachable devices still receive an envelope', send.envelopes.length >= 1, send.envelopes.length);
+    check('the stale device is reported, not silently dropped', send.unreachable.some((entry) => entry.deviceId === staleDeviceId), send.unreachable);
+    check('the send is not blocked for everybody', send.skipped.length === 0, send.skipped);
+
+    // The opposite case: a member with *no* keys at all must block the send outright.
+    const noKeysClient = await loginSeeded('cipher_c');
+    const noKeysMe = await noKeysClient.get<{ id: string }>('/api/users/me');
+    const blockedConversation = await alice.client.post<{ conversation: { id: string } }>('/api/conversations/direct', {
+      userId: noKeysMe.id,
+    });
+    const blockedStatus = await alice.engine.conversationStatus(blockedConversation.conversation.id);
+    const blockedSend = await alice.engine.encryptForConversation(blockedStatus, 'nobody can read this');
+    check(
+      'a participant with no keys is reported as a blocking skip',
+      blockedSend.skipped.some((entry) => entry.userId === noKeysMe.id),
+      blockedSend.skipped,
+    );
+    // Everything that did get an envelope belongs to alice's own devices; nothing was produced for
+    // the keyless member, and the composer refuses the send because `skipped` is not empty.
+    const ownDevices = (await alice.client.get<{ devices: Array<{ deviceId: string }> }>('/api/keys/me')).devices.map(
+      (entry) => entry.deviceId,
+    );
+    check(
+      'only the sender\'s own devices receive envelopes in that case',
+      blockedSend.envelopes.every((envelope) => ownDevices.includes(envelope.deviceId)),
+      blockedSend.envelopes.map((envelope) => envelope.deviceId),
+    );
+
+    // The server agrees: such a conversation cannot be switched to encrypted in the first place.
+    let refused = false;
+    try {
+      await alice.engine.setConversationEncryption(blockedConversation.conversation.id, true);
+    } catch (error) {
+      refused = String(error).includes('participant_without_keys') || String(error).includes('409');
+    }
+    check('the server refuses to encrypt a conversation with a keyless member', refused);
+
+    await staleClient.post('/api/auth/logout').catch(() => {});
+    await noKeysClient.post('/api/auth/logout').catch(() => {});
+  }
+
+  console.log('[10] refusals that protect the conversation');
   let refusals = 0;
   try {
     // Plaintext into an encrypted conversation must be rejected, not silently stored.

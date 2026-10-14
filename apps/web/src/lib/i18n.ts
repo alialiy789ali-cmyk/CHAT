@@ -148,6 +148,10 @@ const strings: Dict = {
     en: 'Could not send an encrypted message: a participant has no ready device.',
   },
   securityCenter: { ar: 'مركز الأمان', en: 'Security centre' },
+  someDevicesUnreachable: {
+    ar: 'أُرسلت الرسالة، لكن بعض أجهزة المشاركين غير قابلة للوصول حالياً (جهاز قديم أو نفدت مفاتيحه) — لن تُقرأ عليه حتى يعود.',
+    en: 'Message sent, but some participant devices are unreachable right now (an old device, or an exhausted key pool) — they will not read it until they return.',
+  },
   attachmentsNotEncrypted: {
     ar: 'المرفقات غير مشفّرة طرفياً بعد، لذلك تُعطَّل في المحادثات المشفّرة.',
     en: 'Attachments are not end-to-end encrypted yet, so they are disabled in encrypted chats.',

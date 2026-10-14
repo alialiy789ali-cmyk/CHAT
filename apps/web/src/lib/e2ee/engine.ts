@@ -160,16 +160,29 @@ export class E2eeEngine {
    *
    * `skipDeviceId` is this browser's own device: the sender holds the plaintext locally, so
    * spending a ratchet on itself would only add ciphertext nobody needs.
-   * Returns the envelopes plus the devices that could not be encrypted for, so the UI can refuse
-   * to send a message that some members would be unable to read.
+   *
+   * Two very different failures are reported separately, because they call for opposite
+   * reactions:
+   *
+   *   `skipped`     — a **user** with no addressable device at all. Sending would deliver a
+   *                   message that member can never read, so the caller must refuse the send.
+   *   `unreachable` — one **device** of an otherwise reachable user (typically a phone that was
+   *                   lost, or a browser whose key pool ran dry). Blocking the conversation
+   *                   forever because one dead device stopped answering would punish everybody
+   *                   else, so the send proceeds and the gap is reported.
    */
   async encryptForConversation(
     conversation: ConversationEncryptionStatus,
     plaintext: string,
     skipDeviceId: string | null = this.deviceId,
-  ): Promise<{ envelopes: MessageEnvelope[]; skipped: Array<{ userId: string; reason: string }> }> {
+  ): Promise<{
+    envelopes: MessageEnvelope[];
+    skipped: Array<{ userId: string; reason: string }>;
+    unreachable: Array<{ userId: string; deviceId: string; reason: string }>;
+  }> {
     const envelopes: MessageEnvelope[] = [];
     const skipped: Array<{ userId: string; reason: string }> = [];
+    const unreachable: Array<{ userId: string; deviceId: string; reason: string }> = [];
     const targets = [...new Set(conversation.participants.map((participant) => participant.userId))];
 
     for (const userId of targets) {
@@ -184,20 +197,38 @@ export class E2eeEngine {
         skipped.push({ userId, reason: 'no_usable_devices' });
         continue;
       }
+
+      let addressedCount = 0;
       for (const bundle of bundles) {
-        if (bundle.deviceId === skipDeviceId) continue;
+        if (bundle.deviceId === skipDeviceId) {
+          addressedCount += 1;
+          continue;
+        }
         try {
           const { envelope } = await this.device.encryptFor(bundle, plaintext);
           envelopes.push(envelope);
+          addressedCount += 1;
         } catch (error) {
-          // The usual cause is an exhausted one-time key pool; the caller decides whether that is
-          // fatal for this send (it is: that member would not be able to read the message).
+          // The usual cause is an exhausted one-time key pool on a device that never came back.
           console.warn('[e2ee] encrypt failed for device', bundle.deviceId, error);
-          skipped.push({ userId, reason: error instanceof Error ? error.message : 'encrypt_failed' });
+          unreachable.push({
+            userId,
+            deviceId: bundle.deviceId,
+            reason: error instanceof Error ? error.message : 'encrypt_failed',
+          });
+        }
+      }
+
+      // A user is only "skipped" when *nothing* of theirs could be addressed — including this
+      // device itself, which keeps the plaintext locally.
+      if (addressedCount === 0) {
+        skipped.push({ userId, reason: unreachable[0]?.reason ?? 'no_addressable_device' });
+        for (let index = unreachable.length - 1; index >= 0; index -= 1) {
+          if (unreachable[index]!.userId === userId) unreachable.splice(index, 1);
         }
       }
     }
-    return { envelopes, skipped };
+    return { envelopes, skipped, unreachable };
   }
 
   /** Decrypts an envelope for this device and remembers the plaintext locally. */
