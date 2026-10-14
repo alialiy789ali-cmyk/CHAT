@@ -2,6 +2,7 @@ import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { I18nManager, StyleSheet, View } from 'react-native';
 import { SessionProvider } from './src/lib/session';
+import { E2eeProvider } from './src/lib/e2ee/provider';
 import { Root } from './src/navigation';
 import { useTheme } from './src/lib/theme';
 
@@ -33,9 +34,12 @@ export default function App() {
   return (
     <SafeAreaProvider>
       <SessionProvider>
-        <View style={styles.root}>
-          <Shell />
-        </View>
+        {/* E2EE sits inside the session because keys are per account *and* per device row. */}
+        <E2eeProvider>
+          <View style={styles.root}>
+            <Shell />
+          </View>
+        </E2eeProvider>
       </SessionProvider>
     </SafeAreaProvider>
   );

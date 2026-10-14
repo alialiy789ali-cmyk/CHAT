@@ -3,6 +3,7 @@ import { ActivityIndicator, Alert, FlatList, Image, KeyboardAvoidingView, Platfo
 import { api } from '../lib/api';
 import { newClientMessageId, newRequestId, realtime } from '../lib/realtime';
 import { useSession } from '../lib/session';
+import { useE2ee } from '../lib/e2ee/provider';
 import { Avatar, Button, ConnectionBanner } from '../components/ui';
 import { formatTime, spacing, typography, useTheme } from '../lib/theme';
 import type { Conversation } from './ChatListScreen';
@@ -11,7 +12,10 @@ interface Message {
   id: string;
   conversationId: string;
   clientMessageId: string | null;
+  /** Empty for an encrypted message: the server holds ciphertext only. */
   body: string | null;
+  /** 'none' or the scheme of the envelopes attached to this row. */
+  encryptionScheme?: 'none' | 'libsignal-v1' | 'olm-v1';
   type: string;
   createdAt: string;
   editedAt: string | null;
@@ -26,6 +30,11 @@ interface Message {
  *
  * Offline behaviour: sending while the socket is down queues the message locally and
  * retries over HTTP, so a dropped connection never silently loses a message.
+ *
+ * Encrypted conversations take a different path on purpose: the phone encrypts once per
+ * recipient device and posts the envelopes over HTTP, because a WebSocket frame reaches every
+ * device of every member while each device needs its own ciphertext. A message that cannot be
+ * addressed to every member is refused rather than sent as unreadable ciphertext.
  */
 export function ChatScreen({ conversation, onBack }: { conversation: Conversation; onBack: () => void }) {
   const theme = useTheme();
@@ -35,7 +44,10 @@ export function ChatScreen({ conversation, onBack }: { conversation: Conversatio
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
   const [queued, setQueued] = useState<Array<{ clientMessageId: string; body: string; createdAt: string }>>([]);
+  /** Messages this device could not open, with the reason, so the bubble can say why. */
+  const [decryptErrors, setDecryptErrors] = useState<Record<string, string>>({});
   const listRef = useRef<FlatList<Message>>(null);
+  const { engine: e2ee, status: e2eeStatus, identityKey, plaintextFor, rememberPlaintext, decryptMessage } = useE2ee();
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -61,6 +73,40 @@ export function ChatScreen({ conversation, onBack }: { conversation: Conversatio
     if (incoming.length === 0) return;
     realtime.send({ t: 'message.delivered', messageIds: incoming.slice(-50) });
   }, [messages, viewer?.id]);
+
+  /**
+   * Opens every encrypted message this device has not read yet.
+   *
+   * The envelope is fetched for *this* device only; a message whose ciphertext cannot be opened is
+   * reported instead of being rendered as empty text, because "no key for this device" and "the
+   * ciphertext did not authenticate" are different facts and the user should not have to guess.
+   */
+  useEffect(() => {
+    if (e2eeStatus !== 'ready' || !viewer?.id) return;
+    const pending = messages.filter(
+      (message) =>
+        message.encryptionScheme && message.encryptionScheme !== 'none' &&
+        message.sender?.id !== viewer.id &&
+        plaintextFor(message.id) === null &&
+        !decryptErrors[message.id],
+    );
+    if (pending.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      for (const message of pending) {
+        try {
+          await decryptMessage({ messageId: message.id, senderUserId: message.sender!.id });
+        } catch (cause) {
+          if (cancelled) return;
+          const reason = cause instanceof Error ? cause.message : String(cause);
+          setDecryptErrors((current) => ({ ...current, [message.id]: reason }));
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [messages, e2eeStatus, viewer?.id, plaintextFor, decryptErrors, decryptMessage]);
 
   useEffect(() => {
     const off = realtime.onFrame((frame) => {
@@ -102,10 +148,72 @@ export function ChatScreen({ conversation, onBack }: { conversation: Conversatio
     }
   }, [connection, queued, conversation.id]);
 
+  /**
+   * Sends one encrypted message.
+   *
+   * Nothing is queued for later on failure: encrypting needs the recipient's current devices and,
+   * for a new device, a one-time prekey — all of which must be fetched live. Pretending the message
+   * is "pending" while it sits in a queue with a stale ratchet would be worse than saying it failed,
+   * so the text stays in the composer and the reason is shown.
+   */
+  async function sendEncrypted(body: string, clientMessageId: string) {
+    if (!e2ee || e2eeStatus !== 'ready') {
+      Alert.alert('التشفير غير جاهز', 'لم تُنشر مفاتيح هذا الجهاز بعد، فلا يمكن إرسال رسالة مشفّرة الآن.');
+      return;
+    }
+    setSending(true);
+    try {
+      const status = await api.get<{
+        isEncrypted: boolean;
+        ready: boolean;
+        participants: Array<{ userId: string; ready: boolean; devicesWithKeys: number }>;
+      }>(`/api/conversations/${conversation.id}/encryption`);
+      const { envelopes, skipped, unreachable, schemeMismatches } = await e2ee.encryptForConversation(status, body);
+      if (skipped.length > 0 || envelopes.length === 0) {
+        Alert.alert(
+          'تعذّر التشفير لكل الأعضاء',
+          `لا يمكن الوصول إلى: ${skipped.map((entry) => entry.reason).join(', ') || 'لا أجهزة قابلة للتوجيه'}. لم تُرسل الرسالة.`,
+        );
+        return;
+      }
+
+      const result = await api.post<{ message: Message }>(`/api/conversations/${conversation.id}/messages`, {
+        clientMessageId,
+        body: '',
+        replyToId: null,
+        encryptionScheme: 'libsignal-v1',
+        envelopes,
+      });
+      // This phone keeps its own plaintext: it must not have to decrypt its own message, and the
+      // ratchet must not be spent on a device that already holds the text.
+      await rememberPlaintext(result.message.id, body);
+      setText('');
+      setMessages((current) => (current.some((m) => m.id === result.message.id) ? current : [...current, result.message]));
+      if (unreachable.length > 0 || schemeMismatches.length > 0) {
+        Alert.alert(
+          'أُرسلت، لكن ليس لكل الأجهزة',
+          `${unreachable.length + schemeMismatches.length} جهازاً لن يقرأ هذه الرسالة (جهاز قديم أو تطبيق بمخطط تشفير آخر).`,
+        );
+      }
+    } catch (cause) {
+      Alert.alert('لم تُرسل', cause instanceof Error ? cause.message : 'تعذّر إرسال الرسالة المشفّرة.');
+    } finally {
+      setSending(false);
+    }
+  }
+
   async function send() {
     const body = text.trim();
     if (!body) return;
     const clientMessageId = newClientMessageId();
+
+    // Encrypted conversations never take the socket path: a frame reaches every device of every
+    // member, while each device needs its own ciphertext.
+    if (conversation.isEncrypted) {
+      await sendEncrypted(body, clientMessageId);
+      return;
+    }
+
     setText('');
     setSending(true);
     if (connection !== 'open') {
@@ -159,6 +267,7 @@ export function ChatScreen({ conversation, onBack }: { conversation: Conversatio
           editedAt: null,
           deletedAt: null,
           attachments: [] as Message['attachments'],
+          encryptionScheme: 'none' as const,
           state: 'sent' as const,
           sender: viewer ? { id: viewer.id, username: viewer.username, displayName: viewer.displayName, avatarUrl: viewer.avatarUrl } : null,
         })),
@@ -179,7 +288,13 @@ export function ChatScreen({ conversation, onBack }: { conversation: Conversatio
           </Text>
           <Text style={{ color: theme.textMuted, fontSize: 11 }}>
             {conversation.type === 'direct' ? 'محادثة فردية' : `${conversation.memberCount} عضو`}
-            {conversation.isEncrypted ? ' · مشفّرة طرفياً' : ''}
+            {conversation.isEncrypted
+              ? e2eeStatus === 'ready'
+                ? ' · مشفّرة طرفياً (هذا الجهاز جاهز)'
+                : e2eeStatus === 'error'
+                  ? ' · مشفّرة طرفياً — تعذّر تجهيز هذا الجهاز'
+                  : ' · مشفّرة طرفياً — جارٍ تجهيز الجهاز…'
+              : ''}
           </Text>
         </View>
       </View>
@@ -199,6 +314,11 @@ export function ChatScreen({ conversation, onBack }: { conversation: Conversatio
           onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: false })}
           renderItem={({ item }) => {
             const mine = item.sender?.id === viewer?.id;
+            const encrypted = Boolean(item.encryptionScheme && item.encryptionScheme !== 'none');
+            // This device's own plaintext (it wrote it, or it decrypted it) — never the server's.
+            const readable = plaintextFor(item.id) ?? item.body;
+            const unreadable = encrypted && !readable;
+            const failed = unreadable && Boolean(decryptErrors[item.id]);
             return (
               <View style={{ alignSelf: mine ? 'flex-end' : 'flex-start', maxWidth: '82%', gap: 2 }}>
                 {!mine && item.sender ? (
@@ -212,8 +332,16 @@ export function ChatScreen({ conversation, onBack }: { conversation: Conversatio
                     borderRadius: 16,
                   }}
                 >
-                  <Text style={{ color: mine ? theme.bubbleOutText : theme.bubbleInText }}>
-                    {item.deletedAt ? 'حُذفت هذه الرسالة' : item.body}
+                  <Text
+                    style={{
+                      color: mine ? theme.bubbleOutText : theme.bubbleInText,
+                      fontStyle: unreadable ? 'italic' : 'normal',
+                    }}
+                  >
+                    {item.deletedAt
+                      ? 'حُذفت هذه الرسالة'
+                      : readable ??
+                        (failed ? 'تعذّر فك تشفير هذه الرسالة على هذا الجهاز.' : 'جارٍ فك التشفير…')}
                   </Text>
                   {item.attachments.map((attachment) =>
                     attachment.mimeType.startsWith('image/') ? (
@@ -235,6 +363,7 @@ export function ChatScreen({ conversation, onBack }: { conversation: Conversatio
                   )}
                 </View>
                 <Text style={{ color: theme.textMuted, fontSize: 10, alignSelf: mine ? 'flex-end' : 'flex-start' }}>
+                  {encrypted ? '🔒 ' : ''}
                   {formatTime(item.createdAt)}
                   {item.editedAt ? ' · عُدّلت' : ''}
                   {mine ? ` · ${item.state === 'read' ? 'قُرئت' : item.state === 'delivered' ? 'وصلت' : item.id.startsWith('queued-') ? 'بالانتظار' : 'أُرسلت'}` : ''}

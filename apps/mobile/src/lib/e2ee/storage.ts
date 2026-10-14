@@ -194,6 +194,50 @@ export class SignalStore implements StorageType {
     await this.removeRaw(`signedprekey:${keyId}`);
   }
 
+  /** One-time prekey ids held locally, in order. */
+  async localPreKeyIds(): Promise<number[]> {
+    const keys = await this.backend.keys(`e2ee:${this.deviceId}:prekey:`);
+    return keys
+      .map((key) => Number(key.split(':prekey:')[1]))
+      .filter((id) => Number.isInteger(id))
+      .sort((a, b) => a - b);
+  }
+
+  /** Ids the server has already accepted, so a restart does not republish the same batch. */
+  async publishedPreKeyIds(): Promise<number[]> {
+    const raw = await this.getRaw('published-prekeys');
+    if (!raw) return [];
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      return Array.isArray(parsed) ? parsed.filter((id): id is number => typeof id === 'number') : [];
+    } catch {
+      return [];
+    }
+  }
+
+  /** Local prekeys the server has not been told about yet. */
+  async unpublishedPreKeyIds(): Promise<number[]> {
+    const published = new Set(await this.publishedPreKeyIds());
+    return (await this.localPreKeyIds()).filter((id) => !published.has(id));
+  }
+
+  /** True when this device ever published a key set — tells a fresh install from a restart. */
+  async hasPublishedKeys(): Promise<boolean> {
+    return (await this.getRaw('published-prekeys')) !== null;
+  }
+
+  /**
+   * Marks keys as published.
+   *
+   * Called only after the server acknowledged the upload: a key marked here but missing on the server
+   * is a one-time prekey nobody can claim, which silently costs the device a first-message slot.
+   */
+  async markPublishedPreKeys(ids: number[]): Promise<void> {
+    const current = new Set(await this.publishedPreKeyIds());
+    for (const id of ids) current.add(id);
+    await this.setRaw('published-prekeys', JSON.stringify([...current].sort((a, b) => a - b)));
+  }
+
   async loadSession(encodedAddress: string): Promise<string | undefined> {
     return (await this.getRaw(`session:${encodedAddress}`)) ?? undefined;
   }

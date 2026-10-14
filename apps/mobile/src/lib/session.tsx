@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
-import { api, ApiError } from './api';
+import { api, ApiError, devicePayload } from './api';
 import { realtime, type ConnectionState } from './realtime';
 
 /** Authentication + viewer state for the whole app (same shapes as the web client). */
@@ -32,6 +32,13 @@ interface SessionValue {
   viewer: Viewer | null;
   status: 'loading' | 'authenticated' | 'anonymous';
   connection: ConnectionState;
+  /**
+   * This phone's device row on the server.
+   *
+   * E2EE keys are published *per device*, and envelopes are addressed to a device id, so the app
+   * needs to know which row is its own before it can encrypt. Null until the session is known.
+   */
+  deviceId: string | null;
   login: (identifier: string, password: string, totp?: string) => Promise<void>;
   register: (input: { username: string; email: string; password: string; displayName?: string }) => Promise<void>;
   logout: () => Promise<void>;
@@ -44,6 +51,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [viewer, setViewer] = useState<Viewer | null>(null);
   const [status, setStatus] = useState<SessionValue['status']>('loading');
   const [connection, setConnection] = useState<ConnectionState>('closed');
+  const [deviceId, setDeviceId] = useState<string | null>(null);
 
   const refreshViewer = useCallback(async () => {
     const me = await api.get<Viewer>('/api/users/me');
@@ -62,6 +70,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       }
       try {
         await refreshViewer();
+        // The device row is what the E2EE layer publishes keys for and hears envelopes on.
+        try {
+          const sessions = await api.get<Array<{ current: boolean; deviceId: string | null }>>('/api/auth/sessions');
+          setDeviceId(sessions.find((entry) => entry.current)?.deviceId ?? null);
+        } catch {
+          setDeviceId(null);
+        }
       } catch {
         setStatus('anonymous');
       }
@@ -88,13 +103,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const login = useCallback(
     async (identifier: string, password: string, totp?: string) => {
-      const result = await api.post<{ accessToken: string; refreshToken: string }>('/api/auth/login', {
-        identifier,
-        password,
-        totp,
-        device: { name: 'Sovereign mobile', platform: 'mobile' },
-      });
+      const result = await api.post<{ accessToken: string; refreshToken: string; deviceId: string | null }>(
+        '/api/auth/login',
+        { identifier, password, totp, device: await devicePayload() },
+      );
       await api.setTokens(result.accessToken, result.refreshToken);
+      setDeviceId(result.deviceId);
       await refreshViewer();
     },
     [refreshViewer],
@@ -102,13 +116,17 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const register = useCallback(
     async (input: { username: string; email: string; password: string; displayName?: string }) => {
-      const result = await api.post<{ accessToken: string; refreshToken: string }>('/api/auth/register', {
-        ...input,
-        username: input.username.toLowerCase(),
-        email: input.email.toLowerCase(),
-        device: { name: 'Sovereign mobile', platform: 'mobile' },
-      });
+      const result = await api.post<{ accessToken: string; refreshToken: string; deviceId: string | null }>(
+        '/api/auth/register',
+        {
+          ...input,
+          username: input.username.toLowerCase(),
+          email: input.email.toLowerCase(),
+          device: await devicePayload(),
+        },
+      );
       await api.setTokens(result.accessToken, result.refreshToken);
+      setDeviceId(result.deviceId);
       await refreshViewer();
     },
     [refreshViewer],
@@ -117,14 +135,15 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const logout = useCallback(async () => {
     await api.post('/api/auth/logout', {}).catch(() => {});
     realtime.close();
+    setDeviceId(null);
     await api.clearTokens();
     setViewer(null);
     setStatus('anonymous');
   }, []);
 
   const value = useMemo(
-    () => ({ viewer, status, connection, login, register, logout, refreshViewer }),
-    [viewer, status, connection, login, register, logout, refreshViewer],
+    () => ({ viewer, status, connection, deviceId, login, register, logout, refreshViewer }),
+    [viewer, status, connection, deviceId, login, register, logout, refreshViewer],
   );
 
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;

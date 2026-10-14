@@ -114,11 +114,23 @@ MAX_ACTIVE_SESSIONS=50 npm run dev
 
 # الخيار 4: أعد بناء قاعدة التطوير بالكامل (يمسح البيانات)
 cd apps/server && npm run db:reset && npm run seed
+
+# الخيار 5 (للمشغّل، ولأي حساب لا للتجريبي فقط): أداة الجلسات — تعرض الجلسات وتُنهيها مع تسجيل
+# تدقيق. تُستخدم أيضاً عند فقدان جهاز أو الاشتباه في جهاز مسروق، ولا تلمس الأجهزة أو المفاتيح.
+npm run sessions -w @sovereign/server -- list layla
+npm run sessions -w @sovereign/server -- revoke layla --reason "جهاز مفقود"
+npm run sessions -w @sovereign/server -- revoke layla --keep <sessionId>   # إبقاء جهاز واحد
 ```
 
 منذ إصلاح هوية الجهاز لا تتراكم الأجهزة: كل عميل يُرسل `device.key` ثابتاً (الويب يخزّنه في
 `localStorage` وسكربتات الفحص تُمرّره صراحةً)، فتسجيل الدخول المتكرر من التثبيت نفسه يُعيد استخدام
 صفّ الجهاز ويستبدل جلسته القديمة. تبقى الحاجة إلى ما سبق فقط للحسابات القديمة المتراكمة.
+
+
+## تطبيق الجوال
+
+راجع [`apps/mobile/README.md`](../apps/mobile/README.md) — التشغيل، عنوان الخادم على الجهاز الحقيقي،
+وأوامر التحقق (`npm run test -w @sovereign/mobile` و`npm run test:e2ee -w @sovereign/mobile`).
 
 
 ## متغيرات البيئة المهمة

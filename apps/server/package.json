@@ -19,7 +19,8 @@
     "test:watch": "vitest --config vitest.config.ts",
     "test:e2e": "vitest run --config vitest.config.ts --project e2e --no-file-parallelism",
     "test:all": "npm run test && npm run test:e2e",
-    "smoke": "tsx scripts/smoke.ts"
+    "smoke": "tsx scripts/smoke.ts",
+    "sessions": "tsx scripts/sessions.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^11.1.3",

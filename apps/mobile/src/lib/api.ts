@@ -7,10 +7,54 @@
  *  - the base URL is configurable (a phone reaching your LAN server cannot use localhost);
  *  - retries are explicit and observable, so the UI can show "reconnecting" honestly.
  */
+import { Platform } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 
 const API_URL = (process.env.EXPO_PUBLIC_API_URL ?? 'http://10.0.2.2:8787').replace(/\/$/, '');
 const REFRESH_KEY = 'sovereign.refreshToken';
+const INSTALL_KEY = 'sovereign.installKey';
+
+/**
+ * This install's stable identifier.
+ *
+ * It is *not* a secret — it only tells the server "this is the same phone again". Without it every
+ * sign-in creates a new device row, which orphans that device's E2EE keys (messages encrypted to the
+ * old row become unreadable) and walks the account towards the active-session cap, after which
+ * signing in is refused. With it, signing in again replaces this install's own session and leaves
+ * the phone's identity, prekey pool and history intact.
+ */
+function newInstallKey(): string {
+  const platformCrypto = (globalThis as { crypto?: Crypto }).crypto;
+  if (platformCrypto?.randomUUID) return platformCrypto.randomUUID();
+  return `install-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
+let installKeyPromise: Promise<string> | null = null;
+
+/** Reads (or mints once) the install key from the OS keychain. */
+export function installKey(): Promise<string> {
+  installKeyPromise ??= (async () => {
+    const existing = await SecureStore.getItemAsync(INSTALL_KEY);
+    if (existing) return existing;
+    const created = newInstallKey();
+    await SecureStore.setItemAsync(INSTALL_KEY, created);
+    return created;
+  })();
+  return installKeyPromise;
+}
+
+/** What every sign-in sends so the server recognises this install. */
+export async function devicePayload(platform: string = Platform.OS): Promise<{
+  name: string;
+  platform: string;
+  key: string;
+}> {
+  return {
+    name: platform === 'ios' ? 'Sovereign for iOS' : platform === 'android' ? 'Sovereign for Android' : 'Sovereign mobile',
+    platform,
+    key: await installKey(),
+  };
+}
 
 export class ApiError extends Error {
   constructor(
@@ -131,6 +175,15 @@ class ApiClient {
 
   post<T>(path: string, body?: unknown): Promise<T> {
     return this.request<T>(path, { method: 'POST', body: body === undefined ? undefined : JSON.stringify(body) });
+  }
+
+  /**
+   * PUT is used for publishing E2EE key material: the server treats a repeat as an update of the
+   * same device's keys rather than as a new resource, which is exactly the semantics needed when a
+   * phone reconnects and re-announces itself.
+   */
+  put<T>(path: string, body?: unknown): Promise<T> {
+    return this.request<T>(path, { method: 'PUT', body: body === undefined ? undefined : JSON.stringify(body) });
   }
 
   patch<T>(path: string, body?: unknown): Promise<T> {

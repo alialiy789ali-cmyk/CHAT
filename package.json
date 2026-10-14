@@ -32,7 +32,9 @@
     "test:all": "npm run test:all -w @sovereign/server",
     "clean": "rm -rf apps/*/dist packages/*/dist apps/web/.next apps/server/var/pgdata",
     "check:api": "npm run check:api -w @sovereign/web",
-    "dev:mobile": "npm run start -w @sovereign/mobile"
+    "dev:mobile": "npm run start -w @sovereign/mobile",
+    "test:mobile": "npm run test -w @sovereign/mobile",
+    "test:e2ee:mobile": "npm run test:e2ee -w @sovereign/mobile"
   },
   "devDependencies": {
     "concurrently": "^9.2.1"
