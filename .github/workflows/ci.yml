@@ -127,16 +127,34 @@ jobs:
           echo "API did not become healthy in 60s; last log lines:" >&2
           tail -n 40 /tmp/api.log >&2
           exit 1
+      - name: Start the web server
+        run: |
+          # The contract checks go through the app's own origin on purpose (browser-equivalent:
+          # cookies, CORS, the /api proxy). So the web server has to be up, and waiting for
+          # /api/health *through the proxy* also proves the proxy works.
+          nohup env API_URL=http://127.0.0.1:8787 npm run dev:web > /tmp/web.log 2>&1 &
+          for attempt in $(seq 1 120); do
+            if curl -fsS http://127.0.0.1:3000/api/health > /dev/null; then
+              echo "web server proxying after ${attempt}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "web server did not come up in 120s; last log lines:" >&2
+          tail -n 40 /tmp/web.log >&2
+          exit 1
       - name: Seed demo data
         run: npm run seed
       - name: Smoke checks
         run: npm run smoke
-      - name: Web API contract
+      - name: Web API contract (through the web origin)
         run: npm run check:api
       - name: Browser encryption modules against the live server
         run: npm run test:e2ee -w @sovereign/web
       - name: Phone encryption modules against the live server
         run: npm run test:e2ee -w @sovereign/mobile
-      - name: API log on failure
+      - name: Server logs on failure
         if: failure()
-        run: tail -n 200 /tmp/api.log
+        run: |
+          echo '--- api ---'; tail -n 200 /tmp/api.log || true
+          echo '--- web ---'; tail -n 200 /tmp/web.log || true
