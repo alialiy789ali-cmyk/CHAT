@@ -1,7 +1,7 @@
 import { AppError, assert } from '../lib/errors.js';
 import type { AppDeps, RequestContext } from './context.js';
 import type { DomainEvents } from './events.js';
-import type { DeviceKeyBundleInput } from '@sovereign/shared/validation';
+import type { DeviceKeyBundleInput, OlmDeviceKeyInput } from '@sovereign/shared/validation';
 
 /**
  * End-to-end encryption key distribution.
@@ -25,11 +25,15 @@ import type { DeviceKeyBundleInput } from '@sovereign/shared/validation';
 
 export interface KeyBundleForDevice {
   deviceId: string;
+  algorithm: 'libsignal-v1' | 'olm-v1';
+  /** Scheme-specific bundle. `libsignal-v1` carries a signed prekey (+ Kyber), `olm-v1` a signing key. */
   registrationId: number;
   identityKey: string;
-  signedPreKey: { id: number; publicKey: string; signature: string };
+  signingKey?: string;
+  identitySignature?: string;
+  signedPreKey?: { id: number; publicKey: string; signature: string };
   kyberPreKey?: { id: number; publicKey: string; signature: string };
-  oneTimePreKey?: { id: number; publicKey: string };
+  oneTimePreKey?: { id: number | string; publicKey: string };
 }
 
 export class KeysService {
@@ -135,6 +139,70 @@ export class KeysService {
     return { e2eeEnabled: this.deps.cfg.E2EE_ENABLED, devices };
   }
 
+  /**
+   * Publishes a Matrix Olm device. Two invariants matter here and are enforced for both
+   * schemes: the server stores public material only, and a device cannot publish keys on
+   * behalf of another device (the device id is checked against the caller's session).
+   */
+  async publishOlmIdentity(userId: string, sessionDeviceId: string | null, input: OlmDeviceKeyInput, ctx: RequestContext) {
+    this.assertEnabled();
+    const device = await this.resolveDevice(userId, sessionDeviceId, input.deviceId);
+
+    const previous = await this.deps.repos.keys.findByDevice(device.id);
+    const identityRotated =
+      Boolean(previous) && (previous!.identity_key_public !== input.identityKey || previous!.signing_key_public !== input.signingKey);
+
+    const row = await this.deps.repos.keys.publishOlm({
+      userId,
+      deviceId: device.id,
+      identityKey: input.identityKey,
+      signingKey: input.signingKey,
+      signature: input.signature,
+      oneTimeKeys: input.oneTimeKeys,
+    });
+
+    await this.deps.repos.keys.markUserE2eeReady(userId, true);
+    await this.deps.repos.audit.record({
+      actorId: userId,
+      actorIp: ctx.ip,
+      action: 'e2ee.keys_published',
+      targetType: 'device',
+      targetId: device.id,
+      metadata: { scheme: 'olm-v1', oneTimeKeys: input.oneTimeKeys.length, identityRotated },
+    });
+
+    return {
+      deviceId: device.id,
+      algorithm: row.algorithm,
+      identityRotated,
+      oneTimeKeysStored: row.one_time_prekeys.length,
+    };
+  }
+
+  /** Top-up of Olm one-time keys (the pool drains one key per new inbound session). */
+  async replenishOlmKeys(
+    userId: string,
+    sessionDeviceId: string | null,
+    input: { deviceId?: string; oneTimeKeys: Array<{ id: string; key: string }> },
+    ctx: RequestContext,
+  ) {
+    this.assertEnabled();
+    const device = await this.resolveDevice(userId, sessionDeviceId, input.deviceId);
+    const existing = await this.deps.repos.keys.findByDevice(device.id);
+    assert(existing?.algorithm === 'olm-v1', 'not_found', 'olm_identity_not_published');
+
+    const total = await this.deps.repos.keys.appendOlmOneTimeKeys(device.id, input.oneTimeKeys);
+    await this.deps.repos.audit.record({
+      actorId: userId,
+      actorIp: ctx.ip,
+      action: 'e2ee.prekeys_replenished',
+      targetType: 'device',
+      targetId: device.id,
+      metadata: { scheme: 'olm-v1', added: input.oneTimeKeys.length, total },
+    });
+    return { deviceId: device.id, algorithm: 'olm-v1' as const, oneTimeKeysStored: total };
+  }
+
   /** ---------------------------------------------------------------- distribution */
 
   /**
@@ -168,27 +236,38 @@ export class KeysService {
     const bundles: KeyBundleForDevice[] = [];
     let issuedOneTime = 0;
     for (const device of devices) {
+      // One-time keys are consumed atomically for both schemes: an Olm one-time key must be
+      // used at most once exactly like a Signal prekey.
       const oneTime = await this.deps.repos.keys.takeOneTimePrekey(device.device_id);
       const bundle: KeyBundleForDevice = {
         deviceId: device.device_id,
+        algorithm: device.algorithm,
         registrationId: device.registration_id,
         identityKey: device.identity_key_public,
-        signedPreKey: {
+      };
+      if (device.algorithm === 'olm-v1') {
+        bundle.signingKey = device.signing_key_public ?? undefined;
+        bundle.identitySignature = device.identity_signature ?? undefined;
+      } else {
+        // The schema forbids a Signal device without a signed prekey; if one ever appears,
+        // skip it rather than hand out a bundle the recipient cannot verify.
+        if (!device.signed_prekey_public || !device.signed_prekey_signature) continue;
+        bundle.signedPreKey = {
           id: device.signed_prekey_id,
           publicKey: device.signed_prekey_public,
           signature: device.signed_prekey_signature,
-        },
-      };
+        };
+        if (device.kyber_prekey_id !== null && device.kyber_prekey_public && device.kyber_prekey_signature) {
+          bundle.kyberPreKey = {
+            id: device.kyber_prekey_id,
+            publicKey: device.kyber_prekey_public,
+            signature: device.kyber_prekey_signature,
+          };
+        }
+      }
       if (oneTime) {
         bundle.oneTimePreKey = { id: oneTime.id, publicKey: oneTime.key };
         issuedOneTime += 1;
-      }
-      if (device.kyber_prekey_id !== null && device.kyber_prekey_public && device.kyber_prekey_signature) {
-        bundle.kyberPreKey = {
-          id: device.kyber_prekey_id,
-          publicKey: device.kyber_prekey_public,
-          signature: device.kyber_prekey_signature,
-        };
       }
       bundles.push(bundle);
     }
@@ -243,7 +322,18 @@ export class KeysService {
   async verifications(verifierId: string, userId: string) {
     const user = await this.deps.repos.users.findById(userId);
     assert(user, 'not_found', 'user_not_found');
-    const devices = await this.deps.repos.keys.verificationsFor(verifierId, userId);
+    const keys = await this.deps.repos.keys.forUser(userId);
+    const publicKeys = new Map(keys.map((row) => [row.device_id, row]));
+    const devices = (await this.deps.repos.keys.verificationsFor(verifierId, userId)).map((device) => {
+      const key = publicKeys.get(device.deviceId);
+      return {
+        ...device,
+        algorithm: key?.algorithm ?? 'libsignal-v1',
+        // Public keys let the verifier compute the safety number locally; they are not secrets.
+        identityKey: key?.identity_key_public ?? null,
+        signingKey: key?.signing_key_public ?? null,
+      };
+    });
     return {
       userId,
       devices,
@@ -263,7 +353,15 @@ export class KeysService {
     const participants = [];
     for (const member of members) {
       const devices = await this.deps.repos.keys.forUser(member.user_id);
-      participants.push({ userId: member.user_id, role: member.role, devicesWithKeys: devices.length, ready: devices.length > 0 });
+      participants.push({
+        userId: member.user_id,
+        role: member.role,
+        devicesWithKeys: devices.length,
+        ready: devices.length > 0,
+        // A user can hold both Olm and Signal devices, and each envelope names its own scheme —
+        // so report the set instead of guessing one.
+        algorithms: [...new Set(devices.map((device) => device.algorithm))],
+      });
     }
     return {
       conversationId,

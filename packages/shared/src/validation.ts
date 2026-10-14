@@ -115,6 +115,13 @@ export const setMemberRoleSchema = z.object({
   role: z.enum(['admin', 'moderator', 'member', 'subscriber']),
 });
 
+/** One ciphertext per recipient device — pairwise sessions cannot share a single blob. */
+export const messageEnvelopeSchema = z.object({
+  deviceId: uuidSchema,
+  scheme: z.enum(['libsignal-v1', 'olm-v1']),
+  ciphertext: z.string().min(1).max(200_000),
+});
+
 export const sendMessageSchema = z.object({
   clientMessageId: z.string().min(8).max(64),
   body: z.string().max(8000).default(''),
@@ -122,9 +129,14 @@ export const sendMessageSchema = z.object({
   replyToId: uuidSchema.nullable().optional(),
   attachmentIds: z.array(uuidSchema).max(10).default([]),
   mentions: z.array(uuidSchema).max(50).default([]),
-  /** E2EE envelope (reserved; rejected while no E2EE session exists — see docs/SECURITY.md). */
+  /**
+   * E2EE payload. Either one envelope per recipient device (`envelopes`, the multi-device
+   * correct form) or the legacy single `ciphertext`. Rejected outright while the server has
+   * no E2EE session to protect — see docs/security-report.md.
+   */
   ciphertext: z.string().max(200_000).nullable().optional(),
-  encryptionScheme: z.enum(['none', 'libsignal-v1']).default('none'),
+  encryptionScheme: z.enum(['none', 'libsignal-v1', 'olm-v1']).default('none'),
+  envelopes: z.array(messageEnvelopeSchema).max(100).default([]),
 });
 
 export const editMessageSchema = z.object({ body: z.string().min(1).max(8000) });
@@ -285,6 +297,32 @@ export const replenishPreKeysSchema = z.object({
     .max(200),
 });
 
+/**
+ * Matrix Olm device bundle (web client).
+ *
+ * `identityKey` is the Curve25519 identity key, `signingKey` the Ed25519 key that signs it —
+ * recipients MUST verify that signature before trusting the identity, which is what stops a
+ * malicious server from substituting keys.
+ */
+export const olmDeviceKeySchema = z.object({
+  deviceId: uuidSchema.optional(),
+  algorithm: z.literal('olm-v1').default('olm-v1'),
+  identityKey: base64Schema,
+  signingKey: base64Schema,
+  /** Ed25519 signature over the raw identity-key bytes. */
+  signature: base64Schema,
+  /** Olm allows at most 100 one-time keys; clients top the pool up as it drains. */
+  oneTimeKeys: z
+    .array(z.object({ id: z.string().min(1).max(64), key: base64Schema }))
+    .min(1)
+    .max(100),
+});
+
+export const olmReplenishSchema = z.object({
+  deviceId: uuidSchema.optional(),
+  oneTimeKeys: z.array(z.object({ id: z.string().min(1).max(64), key: base64Schema })).min(1).max(100),
+});
+
 export const deviceVerificationSchema = z.object({
   deviceId: uuidSchema,
   /** Safety number the verifier compared, formatted by the client. */
@@ -294,5 +332,7 @@ export const deviceVerificationSchema = z.object({
 
 export const conversationEncryptionSchema = z.object({ enabled: z.boolean() });
 
+export type OlmDeviceKeyInput = z.infer<typeof olmDeviceKeySchema>;
+export type MessageEnvelopeInput = z.infer<typeof messageEnvelopeSchema>;
 export type DeviceKeyBundleInput = z.infer<typeof deviceKeyBundleSchema>;
 export type DeviceVerificationInput = z.infer<typeof deviceVerificationSchema>;

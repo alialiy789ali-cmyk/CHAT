@@ -3,6 +3,7 @@ import type { ServerFrame } from '@sovereign/shared/protocol';
 import { e2e } from '../helpers/setup-e2e.js';
 import { ApiClient, PASSWORD, uniqueEmail, uniqueUsername } from '../helpers/client.js';
 import { SignalDevice } from '../helpers/signal.js';
+import { OlmDevice, safetyNumberFromBytes, sasBytesBothSides } from '../helpers/olm.js';
 
 /**
  * The acceptance criteria from the project brief, executed against the real server
@@ -1060,5 +1061,234 @@ describe('acceptance criteria', () => {
     });
     expect(disabled.status).toBe(200);
     expect(disabled.body.isEncrypted).toBe(false);
+  });
+  it('23. a browser-grade Matrix Olm session works end to end and the server sees only envelopes', async () => {
+    const base = e2e().baseUrl;
+    const alice = new ApiClient(base);
+    const bob = new ApiClient(base);
+    const carol = new ApiClient(base);
+    await alice.register({ username: uniqueUsername('olmalice') });
+    await bob.register({ username: uniqueUsername('olmbob') });
+    await carol.register({ username: uniqueUsername('olmcarol') });
+
+    // Two independent devices, each with its own ratchet state held locally.
+    const aliceDevice = await OlmDevice.create('alice-web');
+    const bobDevice = await OlmDevice.create('bob-web');
+    const carolDevice = await OlmDevice.create('carol-web');
+
+    // A malformed bundle is rejected before anything is stored.
+    const badPublish = await alice.request('PUT', '/api/keys/identity/olm', {
+      body: { deviceId: alice.deviceId, identityKey: 'not base64!', signingKey: 'x', signature: 'y', oneTimeKeys: [] },
+    });
+    expect(badPublish.status).toBe(400);
+
+    const alicePublish = await alice.request<{ deviceId: string; algorithm: string; oneTimeKeysStored: number }>(
+      'PUT',
+      '/api/keys/identity/olm',
+      { body: aliceDevice.publish(20) },
+    );
+    expect(alicePublish.status).toBe(200);
+    expect(alicePublish.body.algorithm).toBe('olm-v1');
+    expect(alicePublish.body.oneTimeKeysStored).toBe(20);
+    expect(alicePublish.body.deviceId).toBe(alice.deviceId);
+    const bobPublish = await bob.request('PUT', '/api/keys/identity/olm', { body: bobDevice.publish(20) });
+    expect(bobPublish.status).toBe(200);
+    await carol.request('PUT', '/api/keys/identity/olm', { body: carolDevice.publish(5) });
+
+    // The device inventory reports the Olm scheme, not a Signal-shaped lie.
+    const inventory = await bob.request<{
+      devices: Array<{ algorithm: string; remainingOneTimePreKeys: number; signingKey: string | null }>;
+    }>('GET', '/api/keys/me');
+    expect(inventory.body.devices[0]!.algorithm).toBe('olm-v1');
+    expect(inventory.body.devices[0]!.remainingOneTimePreKeys).toBe(20);
+    expect(inventory.body.devices[0]!.signingKey).toBe(bobDevice.identityKeys().ed25519);
+
+    // Alice fetches Bob's bundle and verifies the identity signature locally.
+    const bundleResponse = await alice.request<{
+      bundles: Array<{
+        deviceId: string;
+        algorithm: string;
+        identityKey: string;
+        signingKey?: string;
+        identitySignature?: string;
+        oneTimePreKey?: { id: string; publicKey: string };
+      }>;
+    }>('GET', `/api/keys/${bob.userId}`);
+    expect(bundleResponse.status).toBe(200);
+    const bobBundle = bundleResponse.body.bundles[0]!;
+    expect(bobBundle.algorithm).toBe('olm-v1');
+    expect(bobBundle.identityKey).toBe(bobDevice.identityKeys().curve25519);
+    expect(bobBundle.oneTimePreKey).toBeDefined();
+    // Self-authenticating device: the signature checks out with the published signing key only.
+    expect(aliceDevice.verify(bobBundle.signingKey!, bobBundle.identityKey, bobBundle.identitySignature!)).toBe(true);
+    // And a substituted identity key does not.
+    expect(aliceDevice.verify(bobBundle.signingKey!, carolDevice.identityKeys().curve25519, bobBundle.identitySignature!)).toBe(false);
+
+    // One-time keys drain one per session, so a second fetch cannot reuse the first key.
+    const secondBundle = (await alice.request<{ bundles: Array<{ oneTimePreKey?: { id: string; publicKey: string } }> }>(
+      'GET',
+      `/api/keys/${bob.userId}`,
+    )).body.bundles[0]!;
+    expect(secondBundle.oneTimePreKey!.publicKey).not.toBe(bobBundle.oneTimePreKey!.publicKey);
+    const afterFetch = await bob.request<{ devices: Array<{ remainingOneTimePreKeys: number }> }>('GET', '/api/keys/me');
+    expect(afterFetch.body.devices[0]!.remainingOneTimePreKeys).toBe(18);
+
+    // Top-up puts keys back without touching the identity.
+    const topUp = await bob.request<{ oneTimeKeysStored: number }>('POST', '/api/keys/prekeys/olm', {
+      body: { deviceId: bob.deviceId, oneTimeKeys: bobDevice.topUp(5) },
+    });
+    expect(topUp.status).toBe(200);
+    expect(topUp.body.oneTimeKeysStored).toBe(23);
+
+    // An Olm device and the conversation both support encryption.
+    const conversation = await alice.request<{ conversation: { id: string } }>('POST', '/api/conversations/direct', {
+      body: { userId: bob.userId },
+    });
+    const conversationId = conversation.body.conversation.id;
+    const encryptionStatus = await alice.request<{
+      ready: boolean;
+      participants: Array<{ userId: string; ready: boolean; algorithms: string[] }>;
+    }>('GET', `/api/conversations/${conversationId}/encryption`);
+    expect(encryptionStatus.body.ready).toBe(true);
+    expect(encryptionStatus.body.participants.find((p) => p.userId === bob.userId)!.algorithms).toEqual(['olm-v1']);
+    const enabled = await alice.request('POST', `/api/conversations/${conversationId}/encryption`, { body: { enabled: true } });
+    expect(enabled.status).toBe(200);
+
+    // Ciphertext addressed to somebody outside the conversation is refused outright.
+    const foreignEnvelope = await alice.request('POST', `/api/conversations/${conversationId}/messages`, {
+      body: {
+        clientMessageId: `olm-foreign-${Date.now()}`,
+        encryptionScheme: 'olm-v1',
+        envelopes: [{ deviceId: carol.deviceId, scheme: 'olm-v1', ciphertext: JSON.stringify({ type: 0, body: 'x' }) }],
+      },
+    });
+    expect(foreignEnvelope.status).toBe(400);
+    expect((foreignEnvelope.body as { error: { message: string } }).error.message).toBe('envelope_for_unknown_device');
+
+    // The real handshake: Alice's outbound session (type 0 prekey message) for Bob's device.
+    const secret = 'رسالة مشفّرة بمصفوفة أولم — لا يقرأها الخادم 🔒';
+    const first = await aliceDevice.encryptFirst(
+      bobBundle.identityKey,
+      bobBundle.oneTimePreKey!.publicKey,
+      secret,
+    );
+    expect(first.type).toBe(0);
+    expect(first.ciphertext).not.toContain(secret);
+
+    const sent = await alice.request<{
+      message: { id: string; body: string | null; encryptionScheme: string; envelopes: Array<{ ciphertext: string }> };
+    }>('POST', `/api/conversations/${conversationId}/messages`, {
+      body: {
+        clientMessageId: `olm-${Date.now()}`,
+        encryptionScheme: 'olm-v1',
+        envelopes: [{ deviceId: bob.deviceId, scheme: 'olm-v1', ciphertext: first.ciphertext }],
+      },
+    });
+    expect(sent.status).toBe(201);
+    expect(sent.body.message.body).toBeNull();
+    expect(sent.body.message.encryptionScheme).toBe('olm-v1');
+    // The sender's own response does not leak the recipient's ciphertext.
+    expect(sent.body.message.envelopes).toHaveLength(0);
+
+    // Bob fetches history as his own device and gets exactly one envelope: his.
+    const bobMessages = await bob.request<{ items: Array<{ id: string; body: string | null; envelopes: Array<{ ciphertext: string }> }> }>(
+      'GET',
+      `/api/conversations/${conversationId}/messages?limit=10`,
+    );
+    const incoming = bobMessages.body.items.find((message) => message.id === sent.body.message.id)!;
+    expect(incoming.body).toBeNull();
+    expect(incoming.envelopes).toHaveLength(1);
+    const parsed = JSON.parse(incoming.envelopes[0]!.ciphertext) as { type: number; body: string };
+    const inbound = bobDevice.decryptFirst(aliceDevice.identityKeys().curve25519, parsed.body, parsed.type);
+    expect(inbound.plaintext).toBe(secret);
+    expect(bobDevice.session(inbound.session.session_id())).toBeDefined();
+
+    // Bob replies inside the same ratchet: a normal message (type 1), not another prekey message.
+    const replyText = 'وصلت مشفّرة، أردّ على نفس الجلسة ✅';
+    const reply = bobDevice.encryptOn(inbound.session, replyText);
+    expect(reply.type).toBe(1);
+    const bobSend = await bob.request<{ message: { id: string } }>('POST', `/api/conversations/${conversationId}/messages`, {
+      body: {
+        clientMessageId: `olm-reply-${Date.now()}`,
+        encryptionScheme: 'olm-v1',
+        envelopes: [
+          { deviceId: alice.deviceId, scheme: 'olm-v1', ciphertext: reply.ciphertext },
+          { deviceId: bob.deviceId, scheme: 'olm-v1', ciphertext: reply.ciphertext },
+        ],
+      },
+    });
+    expect(bobSend.status).toBe(201);
+
+    const aliceMessages = await alice.request<{ items: Array<{ id: string; envelopes: Array<{ ciphertext: string }> }> }>(
+      'GET',
+      `/api/conversations/${conversationId}/messages?limit=10`,
+    );
+    const aliceIncoming = aliceMessages.body.items.find((message) => message.id === bobSend.body.message.id)!;
+    expect(aliceIncoming.envelopes).toHaveLength(1);
+    const aliceParsed = JSON.parse(aliceIncoming.envelopes[0]!.ciphertext) as { type: number; body: string };
+    const aliceSession = aliceDevice.session(first.session.session_id())!;
+    expect(aliceDevice.decryptOn(aliceSession, aliceParsed.type, aliceParsed.body)).toBe(replyText);
+
+    // Tampering with a ciphertext is detected by the MAC — a server that rewrites stored
+    // envelopes cannot forge a message. A fresh pair is used so the tampered prekey message
+    // still refers to a one-time key the receiver genuinely holds (otherwise the failure would
+    // be "unknown key" rather than a MAC mismatch).
+    const tamperSender = await OlmDevice.create('tamper-sender');
+    const tamperReceiver = await OlmDevice.create('tamper-receiver');
+    const receiverBundle = tamperReceiver.publish(5);
+    const senderBundle = tamperSender.publish(5);
+    const handshake = await tamperSender.encryptFirst(
+      receiverBundle.identityKey,
+      receiverBundle.oneTimeKeys[0]!.key,
+      'target of the tamper probe',
+    );
+    const handshakeParsed = JSON.parse(handshake.ciphertext) as { type: number; body: string };
+    const flipped = handshakeParsed.body.endsWith('AAAA') ? 'BBBB' : 'AAAA';
+    const tamperedBody = `${handshakeParsed.body.slice(0, -4)}${flipped}`;
+    expect(tamperedBody).not.toBe(handshakeParsed.body);
+    expect(() => tamperReceiver.decryptFirst(senderBundle.identityKey, tamperedBody, handshakeParsed.type)).toThrow(
+      /BAD_MESSAGE_MAC|BAD_MESSAGE/i,
+    );
+    // The untampered copy still decrypts on a receiver that has not consumed the key yet.
+    const honest = tamperReceiver.decryptFirst(senderBundle.identityKey, handshakeParsed.body, handshakeParsed.type);
+    expect(honest.plaintext).toBe('target of the tamper probe');
+
+    // Non-members see neither the ciphertext nor the envelopes.
+    const carolRead = await carol.request('GET', `/api/conversations/${conversationId}/messages`);
+    expect(carolRead.status).toBe(403);
+
+    // Nothing readable reached the server: no plaintext in the payload, and full-text search is blind.
+    expect(JSON.stringify(bobMessages.body)).not.toContain('لا يقرأها الخادم');
+    const search = await alice.request<Array<{ id: string }>>('GET', `/api/messages/search?q=${encodeURIComponent('مشفّرة')}`);
+    expect(search.body.some((item) => item.id === sent.body.message.id)).toBe(false);
+
+    // Safety numbers: both sides derive the same 12 bytes and the same six-digit groups.
+    const sas = await sasBytesBothSides({
+      userA: alice.userId!,
+      deviceA: alice.deviceId!,
+      userB: bob.userId!,
+      deviceB: bob.deviceId!,
+    });
+    expect(sas.alice).toBe(sas.bob);
+    expect(safetyNumberFromBytes(sas.aliceBytes).join(' ')).toBe(safetyNumberFromBytes(sas.bobBytes).join(' '));
+    // A third device exchanging keys with Alice produces a different number — this is what makes
+    // the comparison meaningful when a server tries to insert itself into the conversation.
+    const carolSas = await sasBytesBothSides({
+      userA: alice.userId!,
+      deviceA: alice.deviceId!,
+      userB: carol.userId!,
+      deviceB: carol.deviceId!,
+    });
+    expect(carolSas.alice).not.toBe(sas.alice);
+    // The verification API surfaces both public keys, so the client can recompute the number.
+    const verifierView = await alice.request<{
+      devices: Array<{ deviceId: string; algorithm: string; identityKey: string | null; signingKey: string | null }>;
+    }>('GET', `/api/keys/verify/${bob.userId}`);
+    const bobPublic = verifierView.body.devices.find((device) => device.deviceId === bob.deviceId)!;
+    expect(bobPublic.algorithm).toBe('olm-v1');
+    expect(bobPublic.identityKey).toBe(bobDevice.identityKeys().curve25519);
+    expect(bobPublic.signingKey).toBe(bobDevice.identityKeys().ed25519);
+    // Nothing in that response is private material.
+    expect(JSON.stringify(verifierView.body)).not.toContain('Curve25519PrivateKey');
   });
 });

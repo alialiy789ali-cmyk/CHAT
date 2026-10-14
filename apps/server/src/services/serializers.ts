@@ -48,6 +48,8 @@ export function messageToDto(
   row: MessageWithContextRow,
   attachments: AttachmentRow[] = [],
   receiptState: 'sent' | 'delivered' | 'read' = 'sent',
+  /** Ciphertext addressed to the requesting device only (empty for plaintext messages). */
+  envelopes: Array<{ deviceId: string; scheme: 'libsignal-v1' | 'olm-v1'; ciphertext: string }> = [],
 ): Message {
   const deleted = row.deleted_at !== null;
   return {
@@ -82,7 +84,8 @@ export function messageToDto(
     // The envelope travels through the API untouched: it is readable only by devices that
     // hold the session keys. Deleting a message clears it (see messages repo softDelete).
     ciphertext: deleted ? null : row.ciphertext,
-    encryptionScheme: (deleted ? 'none' : row.encryption_scheme) as 'none' | 'libsignal-v1',
+    encryptionScheme: (deleted ? 'none' : row.encryption_scheme) as 'none' | 'libsignal-v1' | 'olm-v1',
+    envelopes: deleted ? [] : envelopes,
     editedAt: row.edited_at ? row.edited_at.toISOString() : null,
     deletedAt: row.deleted_at ? row.deleted_at.toISOString() : null,
     state: receiptState,

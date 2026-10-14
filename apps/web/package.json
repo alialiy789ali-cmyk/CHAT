@@ -11,6 +11,7 @@
     "check:api": "node scripts/api-contract.mjs"
   },
   "dependencies": {
+    "@matrix-org/olm": "^3.2.15",
     "@sovereign/shared": "*",
     "http-proxy": "^1.18.1",
     "next": "^15.5.27",

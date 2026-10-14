@@ -13,7 +13,7 @@ export interface MessageRow {
   mentions: string[];
   metadata: Record<string, unknown>;
   ciphertext: string | null;
-  encryption_scheme: 'none' | 'libsignal-v1';
+  encryption_scheme: 'none' | 'libsignal-v1' | 'olm-v1';
   edited_at: Date | null;
   deleted_at: Date | null;
   created_at: Date;
@@ -65,7 +65,7 @@ export class MessagesRepo {
     mentions?: string[];
     metadata?: Record<string, unknown>;
     ciphertext?: string | null;
-    encryptionScheme?: 'none' | 'libsignal-v1';
+    encryptionScheme?: 'none' | 'libsignal-v1' | 'olm-v1';
   }): Promise<{ message: MessageRow; duplicated: boolean }> {
     const inserted = await this.db.one<MessageRow>(
       `insert into messages (conversation_id, sender_id, client_message_id, type, body, reply_to_id, forwarded_from_id, mentions, metadata, ciphertext, encryption_scheme)
@@ -108,6 +108,42 @@ export class MessagesRepo {
         [messageId, attachmentIds, uploaderId],
       )
       .then((res) => res.rowCount ?? 0);
+  }
+
+  /**
+   * Stores one ciphertext per recipient device. Replacing on conflict keeps a retried send
+   * idempotent (same client message id → same envelope set).
+   */
+  async insertEnvelopes(
+    messageId: string,
+    envelopes: Array<{ deviceId: string; scheme: 'libsignal-v1' | 'olm-v1'; ciphertext: string }>,
+  ): Promise<void> {
+    for (const envelope of envelopes) {
+      await this.db.query(
+        `insert into message_envelopes (message_id, device_id, scheme, ciphertext)
+         values ($1, $2, $3, $4)
+         on conflict (message_id, device_id) do update set ciphertext = excluded.ciphertext, scheme = excluded.scheme`,
+        [messageId, envelope.deviceId, envelope.scheme, envelope.ciphertext],
+      );
+    }
+  }
+
+  /**
+   * Envelopes addressed to *one* device. A client never receives ciphertext for other
+   * devices — it could not decrypt it, and there is no reason to hand it over.
+   */
+  envelopesForDevice(messageIds: string[], deviceId: string) {
+    if (messageIds.length === 0) return Promise.resolve([] as Array<{ message_id: string; scheme: string; ciphertext: string }>);
+    return this.db.many<{ message_id: string; scheme: string; ciphertext: string }>(
+      `select message_id, scheme, ciphertext from message_envelopes
+       where device_id = $1 and message_id = any($2::uuid[])`,
+      [deviceId, messageIds],
+    );
+  }
+
+  /** Devices that already have an envelope for a message (used to detect delivery gaps). */
+  envelopeDeviceIds(messageId: string) {
+    return this.db.many<{ device_id: string }>('select device_id from message_envelopes where message_id = $1', [messageId]);
   }
 
   findById(id: string): Promise<MessageWithContextRow | null> {

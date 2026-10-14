@@ -2,6 +2,8 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import {
   deviceKeyBundleSchema,
   deviceVerificationSchema,
+  olmDeviceKeySchema,
+  olmReplenishSchema,
   replenishPreKeysSchema,
 } from '@sovereign/shared/validation';
 import type { ServiceContainer } from '../services/container.js';
@@ -44,6 +46,18 @@ export async function registerKeyRoutes(app: FastifyInstance, container: Service
   app.post('/keys/prekeys', { preHandler: [app.authenticate], schema: { tags: ['e2ee'] } }, async (request) => {
     const body = replenishPreKeysSchema.parse(request.body ?? {});
     return keys.replenishPreKeys(request.auth!.userId, await sessionDeviceId(request), body, ctxOf(request));
+  });
+
+  /** Matrix Olm device publication (web client) — Curve25519 identity + Ed25519 signing key. */
+  app.put('/keys/identity/olm', { preHandler: [app.authenticate], schema: { tags: ['e2ee'] } }, async (request) => {
+    const body = olmDeviceKeySchema.parse(request.body ?? {});
+    return keys.publishOlmIdentity(request.auth!.userId, await sessionDeviceId(request), body, ctxOf(request));
+  });
+
+  /** Olm one-time key top-up. */
+  app.post('/keys/prekeys/olm', { preHandler: [app.authenticate], schema: { tags: ['e2ee'] } }, async (request) => {
+    const body = olmReplenishSchema.parse(request.body ?? {});
+    return keys.replenishOlmKeys(request.auth!.userId, await sessionDeviceId(request), body, ctxOf(request));
   });
 
   app.get('/keys/me', { preHandler: [app.authenticate], schema: { tags: ['e2ee'] } }, async (request) =>

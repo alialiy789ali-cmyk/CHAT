@@ -29,7 +29,16 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 /** Conversations, messages, receipts and typing (requirement 2.B). */
 export async function registerMessagingRoutes(app: FastifyInstance, container: ServiceContainer): Promise<void> {
-  const { messaging } = container;
+  const { messaging, deps } = container;
+
+  /**
+   * Device behind the calling session. E2EE is device-scoped: a client only ever receives the
+   * ciphertext addressed to its own device, so every read/write needs this id.
+   */
+  const sessionDevice = async (request: FastifyRequest): Promise<string | null> => {
+    const session = await deps.repos.sessions.findSession(request.auth!.sessionId);
+    return session?.device_id ?? null;
+  };
 
   app.get('/conversations', { preHandler: [app.authenticate], schema: { tags: ['messaging'] } }, async (request) => {
     const { limit, cursor } = paginationSchema.parse(request.query ?? {});
@@ -105,6 +114,7 @@ export async function registerMessagingRoutes(app: FastifyInstance, container: S
       limit,
       cursor,
       search: query.q,
+      viewerDeviceId: await sessionDevice(request),
     });
   });
 
@@ -122,6 +132,8 @@ export async function registerMessagingRoutes(app: FastifyInstance, container: S
       mentions: body.mentions,
       ciphertext: body.ciphertext ?? null,
       encryptionScheme: body.encryptionScheme,
+      envelopes: body.envelopes ?? [],
+      senderDeviceId: await sessionDevice(request),
     });
     // Idempotent retries return 200 with the existing message instead of duplicating.
     reply.status(duplicated ? 200 : 201);

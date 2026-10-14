@@ -31,7 +31,11 @@ export interface SendMessageInputDto {
   attachmentIds?: string[];
   mentions?: string[];
   ciphertext?: string | null;
-  encryptionScheme?: 'none' | 'libsignal-v1';
+  encryptionScheme?: 'none' | 'libsignal-v1' | 'olm-v1';
+  /** Device issuing this send; used to return that device its own envelope. */
+  senderDeviceId?: string | null;
+  /** One envelope per recipient device (pairwise sessions cannot share one blob). */
+  envelopes?: Array<{ deviceId: string; scheme: 'libsignal-v1' | 'olm-v1'; ciphertext: string }>;
 }
 
 export class MessagingService {
@@ -321,7 +325,7 @@ export class MessagingService {
   async listMessages(
     conversationId: string,
     userId: string,
-    params: { limit: number; cursor?: string; search?: string },
+    params: { limit: number; cursor?: string; search?: string; viewerDeviceId?: string | null },
   ) {
     await this.requireMembership(conversationId, userId);
     const { items, nextCursor, hasMore } = await this.messages.list({
@@ -336,13 +340,29 @@ export class MessagingService {
       this.messages.receiptsFor(messageIds),
     ]);
     const attachmentMap = groupBy(attachments, (a) => a.message_id ?? '');
+    // Only this device's own envelopes are handed back: anything else is undecryptable
+    // ciphertext and there is no reason to expose it.
+    const envelopeMap = new Map<string, Array<{ deviceId: string; scheme: 'libsignal-v1' | 'olm-v1'; ciphertext: string }>>();
+    if (params.viewerDeviceId) {
+      for (const envelope of await this.messages.envelopesForDevice(messageIds, params.viewerDeviceId)) {
+        const list = envelopeMap.get(envelope.message_id) ?? [];
+        list.push({
+          deviceId: params.viewerDeviceId,
+          scheme: envelope.scheme as 'libsignal-v1' | 'olm-v1',
+          ciphertext: envelope.ciphertext,
+        });
+        envelopeMap.set(envelope.message_id, list);
+      }
+    }
     const receiptMap = new Map<string, 'delivered' | 'read'>();
     for (const receipt of receipts) {
       const current = receiptMap.get(receipt.message_id);
       if (receipt.state === 'read' || !current) receiptMap.set(receipt.message_id, receipt.state);
     }
     return {
-      items: items.map((row) => messageToDto(row, attachmentMap.get(row.id) ?? [], receiptMap.get(row.id) ?? 'sent')),
+      items: items.map((row) =>
+        messageToDto(row, attachmentMap.get(row.id) ?? [], receiptMap.get(row.id) ?? 'sent', envelopeMap.get(row.id) ?? []),
+      ),
       nextCursor,
       hasMore,
     };
@@ -372,14 +392,29 @@ export class MessagingService {
     const attachmentIds = input.attachmentIds ?? [];
     const body = input.body ?? '';
 
+    const envelopes = input.envelopes ?? [];
+    const hasCiphertext = Boolean(input.ciphertext) || envelopes.length > 0;
     if (conversation.is_encrypted) {
       // Encryption is only honoured when the platform reports it as available.
-      if (!this.deps.cfg.E2EE_ENABLED || input.encryptionScheme !== 'libsignal-v1' || !input.ciphertext) {
+      if (!this.deps.cfg.E2EE_ENABLED || !hasCiphertext) {
         throw new AppError('e2ee_not_available', 'encrypted_conversation_requires_ciphertext');
       }
-    } else if (input.ciphertext || input.encryptionScheme === 'libsignal-v1') {
+    } else if (hasCiphertext) {
       // Never silently downgrade an attempt to send ciphertext into stored plaintext.
       throw new AppError('e2ee_not_available', 'e2ee_disabled_on_server');
+    }
+
+    // A sender may only address devices that belong to members of this conversation — a
+    // message must not be able to deposit ciphertext into an unrelated person's inbox.
+    if (envelopes.length > 0) {
+      const memberIds = await this.deps.repos.conversations.memberIds(input.conversationId);
+      const allowed = new Set<string>();
+      for (const memberId of memberIds) {
+        const devices = await this.deps.repos.keys.forUser(memberId);
+        for (const device of devices) allowed.add(device.device_id);
+      }
+      const foreign = envelopes.filter((envelope) => !allowed.has(envelope.deviceId));
+      assert(foreign.length === 0, 'validation_error', 'envelope_for_unknown_device');
     }
 
     // An encrypted message carries its content inside the ciphertext, so an empty body is
@@ -388,7 +423,7 @@ export class MessagingService {
       body.trim().length > 0 ||
         attachmentIds.length > 0 ||
         input.type === 'voice' ||
-        (Boolean(input.ciphertext) && conversation.is_encrypted),
+        (hasCiphertext && conversation.is_encrypted),
       'validation_error',
       'message_must_have_content',
     );
@@ -411,6 +446,10 @@ export class MessagingService {
       encryptionScheme: input.encryptionScheme ?? 'none',
     });
 
+    if (envelopes.length > 0 && !duplicated) {
+      await this.messages.insertEnvelopes(message.id, envelopes);
+    }
+
     if (attachmentIds.length > 0 && !duplicated) {
       const attached = await this.messages.attachMessageToAttachments(message.id, attachmentIds, input.senderId);
       assert(attached === attachmentIds.length, 'validation_error', 'some_attachments_unavailable');
@@ -421,7 +460,16 @@ export class MessagingService {
     const attachments = await this.files.listForMessage(message.id);
     const recipientIds = await this.messages.recipientsForDelivery(input.conversationId, input.senderId);
 
-    const dto = messageToDto(full, attachments);
+    // The sender gets back the envelope addressed to *their* device (present only if the
+    // client encrypted a copy for itself, which is what multi-device clients do).
+    const senderEnvelopes = input.senderDeviceId
+      ? (await this.messages.envelopesForDevice([message.id], input.senderDeviceId)).map((envelope) => ({
+          deviceId: input.senderDeviceId!,
+          scheme: envelope.scheme as 'libsignal-v1' | 'olm-v1',
+          ciphertext: envelope.ciphertext,
+        }))
+      : [];
+    const dto = messageToDto(full, attachments, 'sent', senderEnvelopes);
 
     if (!duplicated) {
       // Mark as delivered for anyone currently connected; offline users get 'sent'.

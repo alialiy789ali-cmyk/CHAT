@@ -91,7 +91,12 @@ export interface Message {
    * decrypt it. `null` for ordinary plaintext messages.
    */
   ciphertext: string | null;
-  encryptionScheme: 'none' | 'libsignal-v1';
+  encryptionScheme: 'none' | 'libsignal-v1' | 'olm-v1';
+  /**
+   * Ciphertext addressed to *this* device only. Other devices in the conversation receive
+   * their own envelopes; the server never hands out an envelope a client could not decrypt.
+   */
+  envelopes: Array<{ deviceId: UUID; scheme: 'libsignal-v1' | 'olm-v1'; ciphertext: string }>;
   editedAt: string | null;
   deletedAt: string | null;
   state: MessageState;
