@@ -1,0 +1,157 @@
+# Android smoke test on a real emulator.
+#
+# Why this exists: an APK that builds, verifies and installs can still die on launch. That is exactly
+# what happened — the first published APK crashed the moment it opened on a real phone, and nothing in
+# the pipeline could see it, because "the build succeeded" and "the app runs" are different claims.
+#
+# So a real Android system image boots here, the freshly built APK is installed, launched, and the
+# crash log is the evidence: the job fails if the process is gone or if a fatal exception appears, and
+# it prints the exception block either way.
+#
+# This is also the closest thing to a device that CI can provide. What it cannot cover (a specific
+# phone model, camera, microphone, a real cellular network) stays listed as untested in
+# docs/feature-log.md rather than being implied.
+name: Android smoke test
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['**']
+    paths:
+      - 'apps/mobile/**'
+      - '.github/workflows/android-smoke.yml'
+  # Run after any APK build, so a crash is reported on the same commit that introduced it.
+  workflow_run:
+    workflows: ['Android APK']
+    types: [completed]
+
+concurrency:
+  group: android-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  launch:
+    name: Launch the APK on an emulator
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build shared package
+        run: npm run build -w @sovereign/shared
+
+      # The same build the user installs: if the smoke test used a debug build it would prove nothing,
+      # because the crash only happens in the release/optimised pipeline.
+      - name: Generate the native project and build the release APK
+        working-directory: apps/mobile
+        env:
+          # A reachable-looking address: the smoke test checks that the app *starts*, not that a
+          # server answers.
+          EXPO_PUBLIC_API_URL: http://10.0.2.2:8787
+          MOBILE_ALLOW_CLEARTEXT: 'true'
+        run: |
+          npx expo prebuild --platform android --no-install --clean
+          cd android
+          chmod +x gradlew
+          ./gradlew --no-daemon :app:assembleRelease
+
+      # KVM is enabled on GitHub-hosted runners, so a real system image boots in ~2 minutes rather
+      # than emulating instructions on the CPU.
+      - name: Launch on the emulator and capture the crash
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          force-avd-creation: false
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          # Long enough for a first launch of a Hermes bundle on a cold emulator.
+          script: |
+            set -x
+            APK=$(find apps/mobile/android/app/build/outputs/apk/release -name '*.apk' | head -n 1)
+            ls -lh "$APK"
+            adb install -r "$APK"
+            adb logcat -c
+            adb shell am start -W -n app.sovereign.client/.MainActivity || true
+            # Give the JS bundle time to load, then look at what the system recorded.
+            sleep 40
+            adb shell pidof app.sovereign.client > pid.txt || true
+            adb shell dumpsys activity activities > activities.txt || true
+            adb logcat -d > logcat.txt || true
+            adb logcat -d -b crash > crash.txt || true
+
+      - name: Report the outcome
+        run: |
+          echo "### Android launch check" >> "$GITHUB_STEP_SUMMARY"
+          PID=$(cat pid.txt 2>/dev/null | tr -d '\r')
+          if [ -n "$PID" ]; then
+            echo "The app is running (pid $PID)." >> "$GITHUB_STEP_SUMMARY"
+            ALIVE=1
+          else
+            echo "**The app is not running after launch.**" >> "$GITHUB_STEP_SUMMARY"
+            ALIVE=0
+          fi
+
+          RESUMED=$(grep -E "mResumedActivity|ResumedActivity|topResumedActivity" activities.txt | head -n 3 || true)
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Foreground activity:" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "$RESUMED" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Fatal exceptions found in logcat:" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          grep -A 40 -E "FATAL EXCEPTION|AndroidRuntime.*(FATAL|E )" logcat.txt crash.txt 2>/dev/null | head -n 120 >> "$GITHUB_STEP_SUMMARY" || echo "none" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "App-tagged log lines:" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          grep -E "sovereign|ReactNative|Hermes|expo" logcat.txt | head -n 60 >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+          # Also print to the job log, because that is what a person reads first.
+          echo "=== fatal exceptions ==="
+          grep -B 5 -A 60 -E "FATAL EXCEPTION" logcat.txt crash.txt 2>/dev/null | head -n 200 || echo "none"
+          echo "=== app lines ==="
+          grep -E "sovereign|ReactNativeJS|Hermes" logcat.txt | head -n 80 || true
+
+          if [ "$ALIVE" != "1" ]; then
+            echo "::error::the APK did not stay running on the emulator"
+            exit 1
+          fi
+          if grep -q "FATAL EXCEPTION" logcat.txt crash.txt 2>/dev/null; then
+            echo "::error::the APK crashed at launch (see the exception above)"
+            exit 1
+          fi
+
+      - name: Keep the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-launch-logs
+          path: |
+            logcat.txt
+            crash.txt
+            activities.txt
+            pid.txt
+          if-no-files-found: warn
+          retention-days: 30
