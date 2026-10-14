@@ -1,0 +1,236 @@
+/**
+ * Mobile API client.
+ *
+ * Differences from the web client, on purpose:
+ *  - the refresh token is stored in the OS keychain (expo-secure-store) because there is
+ *    no httpOnly cookie on React Native;
+ *  - the base URL is configurable (a phone reaching your LAN server cannot use localhost);
+ *  - retries are explicit and observable, so the UI can show "reconnecting" honestly.
+ */
+import { Platform } from 'react-native';
+import * as SecureStore from 'expo-secure-store';
+import { currentApiUrl, usingOverride as overrideActive } from './server-address';
+
+const REFRESH_KEY = 'sovereign.refreshToken';
+const INSTALL_KEY = 'sovereign.installKey';
+
+/**
+ * This install's stable identifier.
+ *
+ * It is *not* a secret — it only tells the server "this is the same phone again". Without it every
+ * sign-in creates a new device row, which orphans that device's E2EE keys (messages encrypted to the
+ * old row become unreadable) and walks the account towards the active-session cap, after which
+ * signing in is refused. With it, signing in again replaces this install's own session and leaves
+ * the phone's identity, prekey pool and history intact.
+ */
+function newInstallKey(): string {
+  const platformCrypto = (globalThis as { crypto?: Crypto }).crypto;
+  if (platformCrypto?.randomUUID) return platformCrypto.randomUUID();
+  return `install-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
+let installKeyPromise: Promise<string> | null = null;
+
+/** Reads (or mints once) the install key from the OS keychain. */
+export function installKey(): Promise<string> {
+  installKeyPromise ??= (async () => {
+    const existing = await SecureStore.getItemAsync(INSTALL_KEY);
+    if (existing) return existing;
+    const created = newInstallKey();
+    await SecureStore.setItemAsync(INSTALL_KEY, created);
+    return created;
+  })();
+  return installKeyPromise;
+}
+
+/** What every sign-in sends so the server recognises this install. */
+export async function devicePayload(platform: string = Platform.OS): Promise<{
+  name: string;
+  platform: string;
+  key: string;
+}> {
+  return {
+    name: platform === 'ios' ? 'Sovereign for iOS' : platform === 'android' ? 'Sovereign for Android' : 'Sovereign mobile',
+    platform,
+    key: await installKey(),
+  };
+}
+
+export class ApiError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    message: string,
+    readonly details?: unknown,
+  ) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+
+type Listener = () => void;
+
+class ApiClient {
+  private accessToken: string | null = null;
+  private refreshToken: string | null = null;
+  private refreshing: Promise<boolean> | null = null;
+  private unauthorizedListeners = new Set<Listener>();
+
+  /**
+   * The address in force. Read at call time from `server-address.ts`, never captured in a module
+   * constant: the user can point this install at another server (see the login screen) without
+   * restarting the app.
+   */
+  get baseUrl(): string {
+    return currentApiUrl();
+  }
+
+  get wsBaseUrl(): string {
+    const configured = process.env.EXPO_PUBLIC_WS_URL;
+    if (configured && !overrideActive()) return configured.replace(/\/$/, '');
+    return currentApiUrl().replace(/^http/, 'ws');
+  }
+
+  onUnauthorized(listener: Listener): () => void {
+    this.unauthorizedListeners.add(listener);
+    return () => this.unauthorizedListeners.delete(listener);
+  }
+
+  async restoreSession(): Promise<boolean> {
+    this.refreshToken = await SecureStore.getItemAsync(REFRESH_KEY);
+    if (!this.refreshToken) return false;
+    return this.refresh();
+  }
+
+  async setTokens(accessToken: string, refreshToken: string): Promise<void> {
+    this.accessToken = accessToken;
+    this.refreshToken = refreshToken;
+    await SecureStore.setItemAsync(REFRESH_KEY, refreshToken);
+  }
+
+  async clearTokens(): Promise<void> {
+    this.accessToken = null;
+    this.refreshToken = null;
+    await SecureStore.deleteItemAsync(REFRESH_KEY);
+  }
+
+  async refresh(): Promise<boolean> {
+    if (this.refreshing) return this.refreshing;
+    this.refreshing = (async () => {
+      try {
+        if (!this.refreshToken) return false;
+        const res = await fetch(`${this.baseUrl}/api/auth/refresh`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ refreshToken: this.refreshToken }),
+        });
+        if (!res.ok) {
+          await this.clearTokens();
+          return false;
+        }
+        const body = (await res.json()) as { accessToken: string; refreshToken?: string };
+        await this.setTokens(body.accessToken, body.refreshToken ?? this.refreshToken);
+        return true;
+      } catch {
+        // Network failure: keep the tokens, the caller decides whether to retry.
+        return false;
+      } finally {
+        this.refreshing = null;
+      }
+    })();
+    return this.refreshing;
+  }
+
+  private async request<T>(path: string, init: RequestInit = {}, retry = true): Promise<T> {
+    const headers = new Headers(init.headers);
+    if (this.accessToken) headers.set('authorization', `Bearer ${this.accessToken}`);
+    if (init.body && !(init.body instanceof FormData) && !headers.has('content-type')) {
+      headers.set('content-type', 'application/json');
+    }
+
+    let res: Response;
+    try {
+      res = await fetch(`${this.baseUrl}${path}`, { ...init, headers });
+    } catch (err) {
+      throw new ApiError(0, 'network_unreachable', 'لا يمكن الوصول إلى الخادم. تحقق من الشبكة أو عنوان الخادم.', String(err));
+    }
+
+    if (res.status === 401 && retry && !path.startsWith('/api/auth/')) {
+      const refreshed = await this.refresh();
+      if (refreshed) return this.request<T>(path, init, false);
+      for (const listener of this.unauthorizedListeners) listener();
+    }
+
+    const text = await res.text();
+    const isJson = (res.headers.get('content-type') ?? '').includes('application/json');
+    const body = text && isJson ? (JSON.parse(text) as unknown) : text;
+
+    if (!res.ok) {
+      const error = (isJson && body && typeof body === 'object' && 'error' in body
+        ? (body as { error: { code: string; message: string; details?: unknown } }).error
+        : { code: 'request_failed', message: String(body).slice(0, 200) }) as { code: string; message: string; details?: unknown };
+      throw new ApiError(res.status, error.code, error.message, error.details);
+    }
+    return body as T;
+  }
+
+  get<T>(path: string): Promise<T> {
+    return this.request<T>(path);
+  }
+
+  post<T>(path: string, body?: unknown): Promise<T> {
+    return this.request<T>(path, { method: 'POST', body: body === undefined ? undefined : JSON.stringify(body) });
+  }
+
+  /**
+   * PUT is used for publishing E2EE key material: the server treats a repeat as an update of the
+   * same device's keys rather than as a new resource, which is exactly the semantics needed when a
+   * phone reconnects and re-announces itself.
+   */
+  put<T>(path: string, body?: unknown): Promise<T> {
+    return this.request<T>(path, { method: 'PUT', body: body === undefined ? undefined : JSON.stringify(body) });
+  }
+
+  patch<T>(path: string, body?: unknown): Promise<T> {
+    return this.request<T>(path, { method: 'PATCH', body: JSON.stringify(body ?? {}) });
+  }
+
+  del<T>(path: string): Promise<T> {
+    return this.request<T>(path, { method: 'DELETE' });
+  }
+
+  /**
+   * Absolute URL for a server path (`/api/files/:id` → `http://host:8787/api/files/:id`).
+   * React Native has no same-origin concept, so every URL the API returns relative must be
+   * resolved against the configured server before an <Image> can use it.
+   */
+  absoluteUrl(path: string): string {
+    if (/^https?:\/\//.test(path)) return path;
+    return `${this.baseUrl}${path.startsWith('/') ? '' : '/'}${path}`;
+  }
+
+  /**
+   * Source object for React Native <Image>/<Video> with the access token attached.
+   * Unlike a browser `<img>`, a native image request *can* carry headers — so no media token
+   * or query-string credential is needed on mobile.
+   */
+  mediaSource(path: string | null | undefined): { uri: string; headers?: Record<string, string> } | undefined {
+    if (!path) return undefined;
+    const uri = this.absoluteUrl(path);
+    return this.accessToken ? { uri, headers: { authorization: `Bearer ${this.accessToken}` } } : { uri };
+  }
+
+  getAccessToken(): string | null {
+    return this.accessToken;
+  }
+
+  /** Uploads a local file (from expo-image-picker / expo-audio) as multipart. */
+  async upload<T>(path: string, file: { uri: string; name: string; type: string }): Promise<T> {
+    const form = new FormData();
+    // React Native accepts this object shape for file parts; the cast keeps TS happy.
+    form.append('file', { uri: file.uri, name: file.name, type: file.type } as unknown as Blob);
+    return this.request<T>(path, { method: 'POST', body: form });
+  }
+}
+
+export const api = new ApiClient();

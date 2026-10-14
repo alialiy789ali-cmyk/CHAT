@@ -1,0 +1,170 @@
+# Continuous integration.
+#
+# Every job here runs on a clean checkout of the owner's own repository: nothing is installed
+# locally, no service outside GitHub is assumed, and the database is a throwaway container the job
+# creates and destroys. Two jobs, in the order a broken commit should be caught:
+#
+#   `checks` — static and hermetic: types, unit tests, the acceptance suite (a real server with a
+#              real PostgreSQL, WebSocket and cryptography), the mobile client's unit tests, and a
+#              production build of both apps.
+#   `live`   — a real API process on :8787 with seeded data, exercised by the checks that talk HTTP:
+#              smoke, the web API contract, the browser encryption modules and the phone encryption
+#              modules. These are the same commands the run-local guide tells a human to run.
+#
+# Deliberate omissions, stated rather than implied: no code-signing of native apps, no app-store
+# upload, no deployment to a server (that needs the owner's host and secrets) and no load testing.
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # CI-only credentials. Not secrets: this database lives for the length of one job.
+  DATABASE_URL: postgresql://sovereign:sovereign_ci@127.0.0.1:5432/sovereign
+  ACCESS_TOKEN_SECRET: ci-access-token-secret-value-32-characters
+  REFRESH_TOKEN_SECRET: ci-refresh-token-secret-value-32-characters
+  REALTIME_TICKET_SECRET: ci-realtime-ticket-secret-32-characters
+  FIELD_ENCRYPTION_KEY: ci-field-encryption-key-32-characters-min
+  SESSION_SECRET: ci-session-secret-value-32-characters-min
+  E2EE_ENABLED: 'true'
+  CACHE_DRIVER: memory
+  STORAGE_DRIVER: local
+  MAIL_DRIVER: console
+  LOG_LEVEL: warn
+  # The contract checks make a few hundred requests on purpose; the shared limiter exists to protect
+  # a real deployment, not to make the tests flaky.
+  RATE_LIMIT_GLOBAL_MAX: '100000'
+  NEXT_TELEMETRY_DISABLED: '1'
+
+jobs:
+  checks:
+    name: types, tests, builds
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: sovereign
+          POSTGRES_PASSWORD: sovereign_ci
+          POSTGRES_DB: sovereign
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sovereign"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Build shared workspace
+        run: npm run build -w @sovereign/shared
+      - name: Typecheck (server, web, mobile)
+        run: npm run typecheck
+      - name: Server unit tests
+        run: npm run test
+      - name: Acceptance suite (real server, real PostgreSQL, real crypto)
+        run: npm run test:e2e
+      - name: Mobile unit tests (Signal protocol, key store)
+        run: npm run test -w @sovereign/mobile
+      - name: Web message-state checks (encrypted body, sealed files)
+        run: npm run check:ui -w @sovereign/web
+      # The harness that decides whether the APK opened runs against a fake device here, because the
+      # emulator job needs a GPU-less Android image and this check needs a second. A harness that
+      # silently captures nothing is worse than no harness: it reports "no logs" as if that were a
+      # result, which is exactly what happened twice before this test existed.
+      - name: Launch-capture harness (against a fake device)
+        run: |
+          sh -n .github/scripts/android-launch-capture.sh
+          sh .github/scripts/test-launch-capture.sh
+      - name: Web build
+        run: npm run build -w @sovereign/web
+      - name: Server build
+        run: npm run build -w @sovereign/server
+
+  live:
+    name: live API checks
+    runs-on: ubuntu-latest
+    needs: checks
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: sovereign
+          POSTGRES_PASSWORD: sovereign_ci
+          POSTGRES_DB: sovereign
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sovereign"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Build shared workspace
+        run: npm run build -w @sovereign/shared
+      - name: Start the API
+        run: |
+          npm run build -w @sovereign/server
+          nohup node apps/server/dist/index.js > /tmp/api.log 2>&1 &
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8787/api/health > /dev/null; then
+              echo "API is up after ${attempt}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "API did not become healthy in 60s; last log lines:" >&2
+          tail -n 40 /tmp/api.log >&2
+          exit 1
+      - name: Start the web server
+        run: |
+          # The contract checks go through the app's own origin on purpose (browser-equivalent:
+          # cookies, CORS, the /api proxy). So the web server has to be up, and waiting for
+          # /api/health *through the proxy* also proves the proxy works.
+          nohup env API_URL=http://127.0.0.1:8787 npm run dev:web > /tmp/web.log 2>&1 &
+          for attempt in $(seq 1 120); do
+            if curl -fsS http://127.0.0.1:3000/api/health > /dev/null; then
+              echo "web server proxying after ${attempt}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "web server did not come up in 120s; last log lines:" >&2
+          tail -n 40 /tmp/web.log >&2
+          exit 1
+      - name: Seed demo data
+        run: npm run seed
+      - name: Smoke checks
+        run: npm run smoke
+      - name: Web API contract (through the web origin)
+        run: npm run check:api
+      - name: Browser encryption modules against the live server
+        run: npm run test:e2ee -w @sovereign/web
+      - name: Phone encryption modules against the live server
+        run: npm run test:e2ee -w @sovereign/mobile
+      - name: Server logs on failure
+        if: failure()
+        run: |
+          echo '--- api ---'; tail -n 200 /tmp/api.log || true
+          echo '--- web ---'; tail -n 200 /tmp/web.log || true

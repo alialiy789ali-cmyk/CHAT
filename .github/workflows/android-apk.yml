@@ -1,0 +1,266 @@
+# Android APK.
+#
+# Builds an installable Android APK from `apps/mobile` and attaches it to the run, with no account,
+# no cloud service and no secret required. That is deliberate: the point of the mobile app is that
+# the owner can put it on their own phone and point it at their own server.
+#
+# Two signing paths, because they answer different questions:
+#
+#   * **debug-key-signed release APK** (default) — the generated native project signs releases with
+#     the Android debug key. It installs on any device (after allowing unknown sources) and is what
+#     testing needs. It is NOT acceptable for a store and NOT a stable identity: two builds from
+#     different machines carry different certificates, so Android refuses to update one over the
+#     other.
+#   * **operator-signed APK** (when the four ANDROID_* secrets exist) — signed with the operator's own
+#     keystore, so upgrades work and the app has one identity. The keystore is the owner's to
+#     generate and keep; this job only uses it.
+#
+# The API address compiled into the APK comes from the `api_url` input, or the MOBILE_API_URL
+# repository variable, and is only a *default*: the login screen lets the user change the server at
+# runtime, so one APK works against a LAN address today and a domain later.
+name: Android APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      api_url:
+        description: 'API origin compiled into the APK (e.g. http://192.168.1.20:8787 or https://chat.example.com)'
+        required: false
+        type: string
+      allow_cleartext:
+        description: 'Allow plain http:// (needed for a self-hosted server without TLS)'
+        required: false
+        type: boolean
+        default: true
+      publish_release:
+        description: 'Publish the APK as a release asset (downloadable from a phone browser)'
+        required: false
+        type: boolean
+        default: false
+  push:
+    branches: ['**']
+    paths:
+      - 'apps/mobile/**'
+      - '.github/workflows/android-apk.yml'
+
+concurrency:
+  group: android-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  apk:
+    name: Build APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      api_url: ${{ steps.address.outputs.api_url }}
+      artifact: ${{ steps.collect.outputs.apk }}
+    env:
+      # Job-level so a step can test for it without touching the secrets context in `if:`.
+      KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # The generated Android project compiles with the JDK the runner images ship; pinning the
+      # version means a silent image change cannot alter the build.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # The mobile app types come from the shared package; without its build output the type layer
+      # fails on a missing module.
+      - name: Build shared package
+        run: npm run build -w @sovereign/shared
+
+      # Cheap gate before the expensive one: crypto and client unit tests first.
+      - name: Mobile unit tests
+        run: npm run test -w @sovereign/mobile
+
+      - name: Resolve API address
+        id: address
+        run: |
+          URL="${{ inputs.api_url }}"
+          if [ -z "$URL" ]; then URL="${{ vars.MOBILE_API_URL }}"; fi
+          if [ -z "$URL" ]; then URL="http://10.0.2.2:8787"; fi
+          echo "api_url=$URL" >> "$GITHUB_OUTPUT"
+          echo "Building with API origin: $URL"
+
+      - name: Generate the native Android project
+        working-directory: apps/mobile
+        env:
+          EXPO_PUBLIC_API_URL: ${{ steps.address.outputs.api_url }}
+          MOBILE_ALLOW_CLEARTEXT: ${{ github.event_name == 'workflow_dispatch' && inputs.allow_cleartext || 'true' }}
+        run: npx expo prebuild --platform android --no-install --clean
+
+      # The cleartext policy is applied by a local config plugin (plugins/with-cleartext-traffic.js).
+      # Reading it back out of the generated manifest is what turns "we set a flag" into evidence:
+      # the previous approach (a plain app-config key) was silently ignored by prebuild and only
+      # showed up when a release APK could not reach an http:// server.
+      - name: Assert the network policy
+        working-directory: apps/mobile
+        env:
+          EXPECTED: ${{ github.event_name == 'workflow_dispatch' && inputs.allow_cleartext || 'true' }}
+        run: |
+          ACTUAL=$(grep -o 'android:usesCleartextTraffic="[a-z]*"' android/app/src/main/AndroidManifest.xml | head -n 1 | sed 's/.*="\(.*\)"/\1/')
+          echo "cleartext traffic allowed: $ACTUAL (requested: $EXPECTED)"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "the generated manifest does not match the requested network policy" >&2
+            exit 1
+          fi
+
+      # Only when the operator supplied a keystore, so the default path needs no secrets at all.
+      - name: Configure release signing
+        if: env.KEYSTORE_B64 != ''
+        working-directory: apps/mobile/android
+        run: |
+          printf '%s' "$KEYSTORE_B64" | base64 -d > app/sovereign-release.keystore
+          cat >> app/build.gradle <<'GRADLE'
+
+          // --- release signing (added by the Android APK workflow) ---
+          android {
+              signingConfigs {
+                  release {
+                      storeFile file('sovereign-release.keystore')
+                      storePassword System.getenv('SOVEREIGN_KEYSTORE_PASSWORD')
+                      keyAlias System.getenv('SOVEREIGN_KEY_ALIAS')
+                      keyPassword System.getenv('SOVEREIGN_KEY_PASSWORD')
+                  }
+              }
+              buildTypes {
+                  release {
+                      signingConfig signingConfigs.release
+                  }
+              }
+          }
+          GRADLE
+          # A silently missing block would produce an unsigned APK; assert the structure.
+          node -e "
+            const text = require('fs').readFileSync('app/build.gradle', 'utf8');
+            if ((text.match(/^android \{/gm) || []).length < 2) throw new Error('release signing block was not applied');
+            console.log('release signing configured');
+          "
+
+      - name: Build release APK
+        working-directory: apps/mobile/android
+        env:
+          SOVEREIGN_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          SOVEREIGN_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          SOVEREIGN_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon :app:assembleRelease
+
+      - name: Collect the artifact
+        id: collect
+        env:
+          API_URL: ${{ steps.address.outputs.api_url }}
+        run: |
+          APK=$(find apps/mobile/android/app/build/outputs/apk/release -name '*.apk' | head -n 1)
+          if [ -z "$APK" ]; then echo "no APK was produced" >&2; exit 1; fi
+          NAME="sovereign-android-${GITHUB_SHA::7}.apk"
+          cp "$APK" "$NAME"
+          echo "apk=$NAME" >> "$GITHUB_OUTPUT"
+          ls -lh "$NAME"
+          SIGNING=$(if [ -n "$KEYSTORE_B64" ]; then echo 'operator keystore'; else echo 'Android debug key (testing only)'; fi)
+          {
+            echo "### Android APK"
+            echo
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| API origin compiled in | \`$API_URL\` |"
+            echo "| Signing | $SIGNING |"
+            echo "| File | \`$NAME\` |"
+            echo
+            echo "The server address can be changed after installation: login screen → «تغيير»."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # A build that cannot be installed is not a deliverable, so the artifact is inspected rather
+      # than assumed: a real ZIP with a manifest and native libraries, plus a signature check with
+      # the same tool Android uses.
+      - name: Verify the APK
+        env:
+          APK: ${{ steps.collect.outputs.apk }}
+        run: |
+          test -f "$APK"
+          unzip -l "$APK" | grep -q "AndroidManifest.xml" || { echo "no manifest in APK" >&2; exit 1; }
+          unzip -l "$APK" | grep -q "classes.dex" || { echo "no dex in APK" >&2; exit 1; }
+          echo "native libs:"
+          unzip -l "$APK" | awk '/lib\/(arm64-v8a|armeabi-v7a|x86_64)\// {print $4}' | sort -u | head -n 8
+          APKSIGNER=$(find "${ANDROID_HOME:-/usr/lib/android-sdk}/build-tools" -name apksigner 2>/dev/null | sort | tail -n 1)
+          if [ -n "$APKSIGNER" ]; then "$APKSIGNER" verify --print-certs "$APK" | head -n 4; else echo "apksigner not found; skipping the signature check"; fi
+          # The Android version range is read from the APK, never assumed.
+          AAPT=$(find "${ANDROID_HOME:-/usr/lib/android-sdk}/build-tools" -name aapt2 2>/dev/null | sort | tail -n 1)
+          if [ -n "$AAPT" ]; then
+            "$AAPT" dump badging "$APK" | grep -E "^package|^sdkVersion|^targetSdkVersion|^uses-permission: name='android.permission.(INTERNET|CAMERA|RECORD_AUDIO)'" | tee /tmp/badging.txt
+            {
+              echo
+              echo "Package facts (read from the built APK):"
+              echo '```'
+              cat /tmp/badging.txt
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sovereign-android-apk
+          path: ${{ steps.collect.outputs.apk }}
+          if-no-files-found: error
+          retention-days: 90
+
+  # Publishes the APK as a release asset: on a phone, a release download is a link you can tap,
+  # while artifact downloads need the GitHub UI and a signed-in session — and the GitHub Actions
+  # artifact storage is not reachable from every environment (it is served from a different host that
+  # filters by network), which is exactly why the file has to travel this way.
+  #
+  # Every build publishes a *prerelease* tagged with the branch and the commit, so a build is always
+  # downloadable without anyone having to open the Actions tab; the newest one is simply the newest
+  # tag. Marking them prereleases keeps them out of the repository's "latest release" slot, which
+  # belongs to a real version.
+  release:
+    name: Attach APK to a release
+    needs: apk
+    if: ${{ inputs.publish_release || github.event_name == 'push' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: sovereign-android-apk
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          API_URL: ${{ needs.apk.outputs.api_url }}
+          APK_FILE: ${{ needs.apk.outputs.artifact }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          APK=$(ls *.apk | head -n 1)
+          BRANCH="${GITHUB_REF_NAME//\//-}"
+          TAG="mobile-${BRANCH}-${SHA::7}"
+          cat > notes.md <<'NOTES'
+          حزمة Android مبنية من هذا المستودع.
+
+          بعد التثبيت يمكن تغيير عنوان الخادم من شاشة الدخول ← «تغيير»، فالحزمة نفسها تعمل مع أي خادم.
+
+          - التوقيع: مفتاح التصحيح (للتجربة) ما لم يكن keystore المالك مضبوطاً في أسرار المستودع.
+          - نطاق إصدارات Android يُقرأ من الحزمة نفسها ويُطبع في ملخّص التشغيل (لا نكتبه هنا تخميناً).
+          NOTES
+          printf '\nعنوان الخادم المضمّن: `%s`\n' "$API_URL" >> notes.md
+          gh release create "$TAG" "$APK" --repo "$REPO" --target "$SHA" --prerelease \
+            --title "تطبيق الجوال ${BRANCH} ${SHA::7}" --notes-file notes.md
+          echo "released $TAG with $APK_FILE"

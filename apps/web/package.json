@@ -1,0 +1,36 @@
+{
+  "name": "@sovereign/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx server.ts",
+    "predev": "node scripts/copy-olm-wasm.mjs",
+    "build": "next build",
+    "prebuild": "node scripts/copy-olm-wasm.mjs",
+    "start": "NODE_ENV=production tsx server.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "check:api": "node scripts/api-contract.mjs",
+    "check:ui": "node --import tsx scripts/ui-state-check.mts",
+    "test:e2ee": "tsx scripts/e2ee-live-test.mts"
+  },
+  "dependencies": {
+    "@matrix-org/olm": "^3.2.15",
+    "@sovereign/shared": "*",
+    "http-proxy": "^1.18.1",
+    "next": "^15.5.27",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "tsx": "^4.23.15"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.3",
+    "@types/http-proxy": "^1.17.16",
+    "@types/node": "^22.20.5",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "fake-indexeddb": "^6.2.5",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,0 +1,40 @@
+node_modules/
+dist/
+build/
+.next/
+out/
+coverage/
+*.tsbuildinfo
+
+# local runtime data (never committed)
+var/
+.data/
+.tmp/
+*.log
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# secrets / infra state
+infra/secrets/
+infra/nginx/certs/
+*.pem
+*.key
+!infra/**/example*.key
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Backup archives and TLS material must never enter the repository.
+infra/backups/*
+!infra/backups/README.md
+infra/nginx/certs/*
+!infra/nginx/certs/README.md
+
+# Olm's WebAssembly payload is copied from the pinned dependency by
+# `apps/web/scripts/copy-olm-wasm.mjs` (npm predev/prebuild), never vendored.
+apps/web/public/olm.wasm

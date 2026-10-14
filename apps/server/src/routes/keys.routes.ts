@@ -1,0 +1,121 @@
+import type { FastifyInstance, FastifyRequest } from 'fastify';
+import {
+  deviceKeyBundleSchema,
+  deviceVerificationSchema,
+  olmDeviceKeySchema,
+  olmReplenishSchema,
+  replenishPreKeysSchema,
+} from '@sovereign/shared/validation';
+import type { ServiceContainer } from '../services/container.js';
+import { clientIp, type RequestContext } from '../services/context.js';
+import { AppError } from '../lib/errors.js';
+
+/** Route params are strings from the URL; a malformed id is a client error, not a 500. */
+function assertUuid(value: string, field: string): void {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) {
+    throw new AppError('validation_error', 'invalid_request', [{ path: field, message: 'expected a uuid' }]);
+  }
+}
+
+/**
+ * E2EE key distribution endpoints.
+ *
+ * These carry **public** key material only. A device publishes its keys here, other clients ask
+ * for a bundle before starting a session, and users record their safety-number judgements.
+ * Message payloads never come through here — they travel as opaque ciphertext in the normal
+ * messaging API (see POST /api/conversations/:id/messages).
+ */
+
+function ctxOf(request: FastifyRequest): RequestContext {
+  return {
+    ip: clientIp(request.headers as Record<string, unknown>, request.ip),
+    userAgent: typeof request.headers['user-agent'] === 'string' ? request.headers['user-agent'] : null,
+    requestId: String(request.id),
+    userId: request.auth?.userId,
+    sessionId: request.auth?.sessionId,
+  };
+}
+
+export async function registerKeyRoutes(app: FastifyInstance, container: ServiceContainer): Promise<void> {
+  const { keys, deps } = container;
+
+  /** The device id of the caller's own session, used as the default publishing target. */
+  const sessionDeviceId = async (request: FastifyRequest): Promise<string | null> => {
+    const session = await deps.repos.sessions.findSession(request.auth!.sessionId);
+    return session?.device_id ?? null;
+  };
+
+  /**
+   * Ciphertext for the calling device only.
+   *
+   * Real-time frames deliberately carry no ciphertext: one frame reaches every device of every
+   * member, while each device needs its own envelope. The receiving client asks here instead.
+   */
+  app.get(
+    '/messages/:messageId/envelope',
+    { preHandler: [app.authenticate], schema: { tags: ['e2ee'] } },
+    async (request) => {
+      const { messageId } = request.params as { messageId: string };
+      assertUuid(messageId, 'messageId');
+      return keys.envelopeForDevice(messageId, request.auth!.userId, await sessionDeviceId(request));
+    },
+  );
+
+  app.put('/keys/identity', { preHandler: [app.authenticate], schema: { tags: ['e2ee'] } }, async (request) => {
+    const body = deviceKeyBundleSchema.parse(request.body ?? {});
+    const result = await keys.publishIdentity(request.auth!.userId, await sessionDeviceId(request), body, ctxOf(request));
+    return result;
+  });
+
+  app.post('/keys/prekeys', { preHandler: [app.authenticate], schema: { tags: ['e2ee'] } }, async (request) => {
+    const body = replenishPreKeysSchema.parse(request.body ?? {});
+    return keys.replenishPreKeys(request.auth!.userId, await sessionDeviceId(request), body, ctxOf(request));
+  });
+
+  /** Matrix Olm device publication (web client) — Curve25519 identity + Ed25519 signing key. */
+  app.put('/keys/identity/olm', { preHandler: [app.authenticate], schema: { tags: ['e2ee'] } }, async (request) => {
+    const body = olmDeviceKeySchema.parse(request.body ?? {});
+    return keys.publishOlmIdentity(request.auth!.userId, await sessionDeviceId(request), body, ctxOf(request));
+  });
+
+  /** Olm one-time key top-up. */
+  app.post('/keys/prekeys/olm', { preHandler: [app.authenticate], schema: { tags: ['e2ee'] } }, async (request) => {
+    const body = olmReplenishSchema.parse(request.body ?? {});
+    return keys.replenishOlmKeys(request.auth!.userId, await sessionDeviceId(request), body, ctxOf(request));
+  });
+
+  app.get('/keys/me', { preHandler: [app.authenticate], schema: { tags: ['e2ee'] } }, async (request) =>
+    keys.inventory(request.auth!.userId),
+  );
+
+  /**
+   * Device directory: *who* has keys, without claiming anything.
+   *
+   * A sender has to know the current device list before it encrypts — a device that appeared after
+   * the last send must be addressed, or its owner reads a locked bubble. Claiming one-time keys from
+   * this endpoint would make every such refresh drain the recipient's pool, so the directory is
+   * free of side effects and the one-time keys are claimed only where a session is actually built
+   * (`GET /keys/:userId`).
+   */
+  app.get('/keys/:userId/devices', { preHandler: [app.authenticate], schema: { tags: ['e2ee'] } }, async (request) => {
+    const { userId } = request.params as { userId: string };
+    return keys.directoryFor(userId, request.auth!.userId, ctxOf(request));
+  });
+
+  /** Bundle lookup: consumes one one-time prekey per device of the target user. */
+  app.get('/keys/:userId', { preHandler: [app.authenticate], schema: { tags: ['e2ee'] } }, async (request) => {
+    const { userId } = request.params as { userId: string };
+    return keys.bundlesFor(userId, request.auth!.userId, ctxOf(request));
+  });
+
+  /** Safety-number verification (per verifier). */
+  app.post('/keys/verify', { preHandler: [app.authenticate], schema: { tags: ['e2ee'] } }, async (request) => {
+    const body = deviceVerificationSchema.parse(request.body ?? {});
+    return keys.verifyDevice(request.auth!.userId, body, ctxOf(request));
+  });
+
+  app.get('/keys/verify/:userId', { preHandler: [app.authenticate], schema: { tags: ['e2ee'] } }, async (request) => {
+    const { userId } = request.params as { userId: string };
+    return keys.verifications(request.auth!.userId, userId);
+  });
+}

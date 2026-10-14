@@ -1,0 +1,169 @@
+# Android smoke test on a real emulator.
+#
+# Why this exists: an APK that builds, verifies and installs can still die on launch. That is exactly
+# what happened — the first published APK crashed the moment it opened on a real phone, and nothing in
+# the pipeline could see it, because "the build succeeded" and "the app runs" are different claims.
+#
+# So a real Android system image boots here, the freshly built APK is installed, launched, and the crash
+# log is the evidence: the job fails if the process is gone or if a fatal exception appears, and the
+# report is published as a GitHub issue — step logs and artifacts are served from hosts that some
+# networks (including the one this project is developed from) cannot reach, and a report nobody can
+# read is not a report.
+#
+# Two failures shaped the current shape, and both are worth keeping in mind when editing this file:
+#   - the emulator needs KVM group permissions enabled first, or it never starts;
+#   - the emulator action runs its `script` input **one line per shell**, so anything multi-line must
+#     live in `.github/scripts/android-launch-capture.sh` and be invoked as a single line.
+#
+# What an emulator cannot cover (a specific phone model, the camera, the microphone, a real cellular
+# network) stays listed as untested in docs/feature-log.md rather than being implied.
+name: Android smoke test
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['**']
+    paths:
+      - 'apps/mobile/**'
+      - '.github/scripts/**'
+      - '.github/workflows/android-smoke.yml'
+  # Run after any APK build, so a crash is reported on the same commit that introduced it.
+  workflow_run:
+    workflows: ['Android APK']
+    types: [completed]
+
+concurrency:
+  group: android-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  launch:
+    name: Launch the APK on an emulator
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build shared package
+        run: npm run build -w @sovereign/shared
+
+      - name: Generate the native project and build the release APK
+        working-directory: apps/mobile
+        env:
+          # A reachable-looking address: the smoke test checks that the app *starts*, not that a
+          # server answers.
+          EXPO_PUBLIC_API_URL: http://10.0.2.2:8787
+          MOBILE_ALLOW_CLEARTEXT: 'true'
+        run: |
+          npx expo prebuild --platform android --no-install --clean
+          cd android
+          chmod +x gradlew
+          ./gradlew --no-daemon :app:assembleRelease
+
+      # The harness that decides "did it open?" is code too, and it reported a bare exit code with no
+      # logs the first time it was used. It is checked and tested before it is trusted with the run.
+      - name: Check the capture harness
+        run: |
+          sh -n .github/scripts/android-launch-capture.sh
+          sh .github/scripts/test-launch-capture.sh
+
+      # Hardware acceleration must be switched on explicitly; without it the emulator cannot start and
+      # the action aborts with a bare exit code. (The first attempt failed exactly this way, which is
+      # why this step is here rather than assumed.)
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+
+      - name: Launch on the emulator and capture the crash
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          emulator-boot-timeout: 900
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          # One line on purpose: the action splits this input into individual lines and runs each in its
+          # own shell, so shell state does not survive between them.
+          script: sh .github/scripts/android-launch-capture.sh
+
+      - name: Summarise the launch
+        if: always()
+        run: |
+          {
+            echo "### Android launch check — \`${GITHUB_SHA::7}\`"
+            echo
+            echo '```'
+            cat launch-logs/verdict.txt 2>/dev/null || echo "the capture script produced no verdict"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The report also goes into an issue: it is the one place that is readable from everywhere.
+      - name: Publish the launch report
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "### Android launch check — \`${GITHUB_SHA::7}\`"
+            echo
+            echo "- Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo
+            if [ -d launch-logs ]; then
+              for file in verdict.txt apk.txt devices.txt boot.txt install.txt start.txt pid.txt \
+                activities.txt crash.txt dropbox.txt logcat.txt clear.txt package.txt screen.txt; do
+                [ -f "launch-logs/$file" ] || continue
+                echo "<details><summary>$file</summary>"
+                echo
+                echo '```'
+                # Enough to carry a stack trace, small enough to stay readable in an issue.
+                head -c 6000 "launch-logs/$file"
+                echo
+                echo '```'
+                echo "</details>"
+                echo
+              done
+            else
+              echo "The capture produced no files at all, so the step failed before it started a device."
+              echo "The emulator action's own error is in the job log."
+            fi
+          } > report.md
+
+          ISSUE=$(gh issue list --repo "$GITHUB_REPOSITORY" --search 'Android launch report in:title' --state open --json number -q '.[0].number' 2>/dev/null || echo "")
+          if [ -z "$ISSUE" ]; then
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "Android launch report" --body-file report.md || \
+              echo "could not open the report issue (contents are in the job summary)"
+          else
+            gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file report.md || \
+              echo "could not comment on the report issue"
+          fi
+
+      - name: Keep the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-launch-logs
+          path: launch-logs/
+          if-no-files-found: warn
+          retention-days: 30
