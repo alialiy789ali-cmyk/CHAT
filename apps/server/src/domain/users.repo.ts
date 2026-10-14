@@ -164,13 +164,14 @@ export class UsersRepo {
     );
   }
 
+  /**
+   * Writes a new password hash. Deliberately *without* session side effects: this is also the
+   * opportunistic KDF upgrade that runs during an ordinary login, and signing a user's other devices
+   * out because they logged in would be a bug. The flows that end sessions on purpose
+   * (`changePassword`, `resetPassword`) do it explicitly through the sessions repo.
+   */
   async updatePassword(id: string, passwordHash: string): Promise<void> {
     await this.db.query('update users set password_hash = $2 where id = $1', [id, passwordHash]);
-    // Password change invalidates every existing session.
-    await this.db.query(
-      'update sessions set revoked_at = now(), revoked_reason = $2 where user_id = $1 and revoked_at is null',
-      [id, 'password_changed'],
-    );
   }
 
   async setEmailVerified(id: string): Promise<void> {

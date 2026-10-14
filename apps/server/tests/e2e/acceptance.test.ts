@@ -4,6 +4,7 @@ import { e2e } from '../helpers/setup-e2e.js';
 import { ApiClient, PASSWORD, uniqueEmail, uniqueUsername } from '../helpers/client.js';
 import { SignalDevice } from '../helpers/signal.js';
 import { OlmDevice, safetyNumberFromBytes, sasBytesBothSides } from '../helpers/olm.js';
+import { extractLink, lastMailTo } from '../../src/lib/mail.js';
 
 /**
  * The acceptance criteria from the project brief, executed against the real server
@@ -1290,5 +1291,132 @@ describe('acceptance criteria', () => {
     expect(bobPublic.signingKey).toBe(bobDevice.identityKeys().ed25519);
     // Nothing in that response is private material.
     expect(JSON.stringify(verifierView.body)).not.toContain('Curve25519PrivateKey');
+  });
+
+  it('24. re-signing in from the same install reuses its device instead of piling up', async () => {
+    const base = e2e().baseUrl;
+    const installKey = 'e2e-install-browser-profile-1';
+    const first = new ApiClient(base);
+    const registered = await first.register({ username: uniqueUsername('install'), deviceKey: installKey });
+    const firstDevice = first.deviceId!;
+    expect(firstDevice).toBeTruthy();
+
+    // Same install, three more sign-ins: the device id must not change, and every earlier session of
+    // *this device* is replaced rather than added — otherwise ten logins would lock the account out.
+    const devices = [firstDevice];
+    const clients = [first];
+    for (let index = 0; index < 3; index += 1) {
+      const again = new ApiClient(base);
+      const result = await again.login(first.username!, PASSWORD, {
+        name: 'Test runner',
+        key: installKey,
+      });
+      devices.push(result.deviceId);
+      clients.push(again);
+    }
+    expect(new Set(devices).size).toBe(1);
+
+    // The previous session of the same install is gone (its access token no longer works)…
+    const staleCall = await clients[0]!.request('GET', '/api/auth/sessions');
+    expect(staleCall.status).toBe(401);
+    // …while the newest one is live.
+    const live = await clients[3]!.request<Array<{ deviceId: string | null }>>('GET', '/api/auth/sessions');
+    expect(live.status).toBe(200);
+    expect(live.body.filter((session) => session.deviceId === firstDevice)).toHaveLength(1);
+
+    // The account lists one device for this install, not four.
+    const deviceList = await clients[0]!.request('GET', '/api/users/me/devices', { token: clients[3]!.accessToken });
+    const owned = (deviceList.body as Array<{ id: string }>).filter((device) => device.id === firstDevice);
+    expect(owned).toHaveLength(1);
+
+    // A second, distinct install is a second device, and the two coexist.
+    const phone = new ApiClient(base);
+    const phoneLogin = await phone.login(first.username!, PASSWORD, { key: 'e2e-install-phone-2' });
+    expect(phoneLogin.deviceId).not.toBe(firstDevice);
+    const both = await phone.request<Array<{ deviceId: string | null }>>('GET', '/api/auth/sessions');
+    expect(new Set(both.body.map((session) => session.deviceId)).size).toBe(2);
+
+    // Twelve sign-ins from one install stay well under the cap: the bug was a hard lockout here.
+    const rotate = new ApiClient(base);
+    for (let index = 0; index < 12; index += 1) {
+      await rotate.login(first.username!, PASSWORD, { key: installKey });
+    }
+    expect(rotate.deviceId).toBe(firstDevice);
+
+    // An install key is not a credential: it only ever resolves inside its owner's devices.
+    const otherUser = new ApiClient(base);
+    await otherUser.register({ username: uniqueUsername('other') });
+    const borrowed = await otherUser.login(otherUser.email!, PASSWORD, { key: installKey });
+    expect(borrowed.deviceId).not.toBe(firstDevice);
+  });
+
+  it('25. password changes revoke other sessions and free a capped account', async () => {
+    const base = e2e().baseUrl;
+    const owner = new ApiClient(base);
+    await owner.register({ username: uniqueUsername('pwd') });
+    const email = owner.email!;
+
+    // Two more installs are signed in; all three sessions are live.
+    const laptop = new ApiClient(base);
+    const tablet = new ApiClient(base);
+    await laptop.login(email, PASSWORD, { key: 'e2e-pwd-laptop' });
+    await tablet.login(email, PASSWORD, { key: 'e2e-pwd-tablet' });
+    const before = await owner.request<unknown[]>('GET', '/api/auth/sessions');
+    expect(before.body.length).toBe(3);
+
+    // Changing the password signs the *other* devices out and keeps the caller signed in.
+    const changed = owner.accessToken;
+    const res = await owner.request<{ changed: boolean; revokedSessions: number }>('POST', '/api/auth/password/change', {
+      body: { currentPassword: PASSWORD, newPassword: 'Sovereign-Changed-Passw0rd' },
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.revokedSessions).toBe(2);
+    expect(owner.accessToken).toBe(changed);
+    const stillIn = await owner.request('GET', '/api/users/me');
+    expect(stillIn.status).toBe(200);
+    for (const other of [laptop, tablet]) {
+      const revoked = await other.request('GET', '/api/users/me');
+      expect(revoked.status).toBe(401);
+    }
+
+    // Fill the session table to the documented cap, so the next login is refused…
+    const fillers: ApiClient[] = [];
+    for (let index = 0; index < 9; index += 1) {
+      const extra = new ApiClient(base);
+      await extra.login(email, 'Sovereign-Changed-Passw0rd', { key: `e2e-pwd-filler-${index}` });
+      fillers.push(extra);
+    }
+    const tooMany = await new ApiClient(base).request<{ error: { code: string } }>('POST', '/api/auth/login', {
+      body: { identifier: email, password: 'Sovereign-Changed-Passw0rd', device: { name: 'One too many', platform: 'web', key: 'e2e-pwd-eleventh' } },
+      token: null,
+    });
+    expect(tooMany.status).toBe(403);
+    expect((tooMany.body as { error: { code: string } }).error.code).toBe('too_many_sessions');
+
+    // …and the documented way out works without touching the database: reset the password, which
+    // revokes everything and lets the owner sign in again.
+    const requested = await new ApiClient(base).request('POST', '/api/auth/password/request-reset', {
+      body: { email },
+      token: null,
+    });
+    expect(requested.status).toBe(200);
+    const mail = lastMailTo(email);
+    const link = mail ? extractLink(mail, /token=[A-Za-z0-9_-]+/) : null;
+    expect(link).toBeTruthy();
+    const token = link!.split('token=')[1]!;
+    const reset = await new ApiClient(base).request('POST', '/api/auth/password/reset', {
+      body: { token, newPassword: 'Sovereign-Recovered-Passw0rd' },
+      token: null,
+    });
+    expect(reset.status).toBe(200);
+    for (const filler of fillers) {
+      const revoked = await filler.request('GET', '/api/users/me');
+      expect(revoked.status).toBe(401);
+    }
+    const backIn = new ApiClient(base);
+    const recovered = await backIn.login(email, 'Sovereign-Recovered-Passw0rd', { key: 'e2e-pwd-laptop' });
+    expect(recovered.user.id).toBe(owner.userId);
+    // Reusing the same install key landed on the same device row as before.
+    expect(recovered.deviceId).toBe(laptop.deviceId);
   });
 });

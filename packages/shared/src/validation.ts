@@ -31,18 +31,29 @@ export const paginationSchema = z.object({
   cursor: z.string().max(200).optional(),
 });
 
+/**
+ * Which client is talking to us.
+ *
+ * `key` identifies an *install*, not a login: it is generated once per browser profile or app
+ * installation and kept locally (it is not a secret and cannot authenticate on its own). Sending it
+ * lets the server reuse the same device row — and therefore the same E2EE identity and one live
+ * session — when the user signs in again, instead of filling the account with orphaned devices.
+ */
+export const deviceSchema = z
+  .object({
+    name: z.string().trim().max(80).optional(),
+    platform: z.enum(['web', 'android', 'ios', 'desktop', 'unknown']).default('web'),
+    key: z.string().trim().min(8).max(128).optional(),
+  })
+  .optional();
+
 export const registerSchema = z.object({
   username: usernameSchema,
   email: emailSchema,
   password: passwordSchema,
   displayName: z.string().trim().min(1).max(60).optional(),
   inviteCode: z.string().max(64).optional(),
-  device: z
-    .object({
-      name: z.string().trim().max(80).optional(),
-      platform: z.enum(['web', 'android', 'ios', 'desktop', 'unknown']).default('web'),
-    })
-    .optional(),
+  device: deviceSchema,
 });
 
 export const loginSchema = z.object({
@@ -52,12 +63,7 @@ export const loginSchema = z.object({
     .string()
     .regex(/^[0-9]{6}$/)
     .optional(),
-  device: z
-    .object({
-      name: z.string().trim().max(80).optional(),
-      platform: z.enum(['web', 'android', 'ios', 'desktop', 'unknown']).default('web'),
-    })
-    .optional(),
+  device: deviceSchema,
 });
 
 export const refreshSchema = z.object({

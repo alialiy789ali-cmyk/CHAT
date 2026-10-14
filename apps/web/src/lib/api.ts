@@ -139,22 +139,49 @@ export class ApiClient {
 
   /* ------------------------------------------------------------------ auth */
 
-  async login(identifier: string, password: string, totp?: string) {
+  /**
+   * `options.totp` is the six-digit second factor; `options.installKey` lets a non-browser caller
+   * (script, test) supply the stable install id it has no localStorage to keep.
+   */
+  async login(identifier: string, password: string, options?: { totp?: string; installKey?: string }) {
     const res = await this.post<{
       user: { id: string; username: string };
       accessToken: string;
-    }>('/api/auth/login', { identifier, password, totp, device: { name: deviceName(), platform: 'web' } });
+    }>('/api/auth/login', {
+      identifier,
+      password,
+      totp: options?.totp,
+      device: this.device(options?.installKey),
+    });
     this.setAccessToken(res.accessToken);
     return res;
   }
 
-  async register(input: { username: string; email: string; password: string; displayName?: string }) {
+  async register(input: {
+    username: string;
+    email: string;
+    password: string;
+    displayName?: string;
+    /** Stable install id for callers without browser storage (see `login`). */
+    installKey?: string;
+  }) {
+    const { installKey, ...profile } = input;
     const res = await this.post<{ user: { id: string; username: string }; accessToken: string }>('/api/auth/register', {
-      ...input,
-      device: { name: deviceName(), platform: 'web' },
+      ...profile,
+      device: this.device(installKey),
     });
     this.setAccessToken(res.accessToken);
     return res;
+  }
+
+  /**
+   * The `device` payload sent on register/login (stable install key + a human-readable name).
+   *
+   * Scripts and tests pass an explicit key because they have no browser storage to keep one in;
+   * in the browser the key comes from localStorage and survives reloads.
+   */
+  private device(installKeyOverride?: string): { name: string; platform: 'web'; key: string } {
+    return { name: deviceName(), platform: 'web', key: installKeyOverride ?? installKey() };
   }
 
   async logout(): Promise<void> {
@@ -175,6 +202,31 @@ export class ApiClient {
     } catch {
       return null;
     }
+  }
+}
+
+/**
+ * Identifies this installation to the server.
+ *
+ * `key` is generated once per browser profile and kept in localStorage. It is deliberately *not* a
+ * secret and is never used as a credential — the server only resolves it inside the authenticated
+ * user's own devices. Its job is stability: the same install keeps one device row, which means one
+ * E2EE identity (the Olm account in IndexedDB stays usable across sign-ins) and one live session
+ * instead of a new orphaned device on every login.
+ */
+function installKey(): string {
+  const storageKey = 'sovereign.install-key';
+  try {
+    const existing = localStorage.getItem(storageKey);
+    if (existing) return existing;
+    const created = typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID()
+      : `install-${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+    localStorage.setItem(storageKey, created);
+    return created;
+  } catch {
+    // Private mode with storage disabled: fall back to a per-session install (old behaviour).
+    return `ephemeral-${Date.now().toString(36)}`;
   }
 }
 

@@ -189,8 +189,14 @@ export async function registerAuthRoutes(app: FastifyInstance, container: Servic
 
   app.post('/auth/password/change', { preHandler: [app.authenticate], schema: { tags: ['auth'] } }, async (request) => {
     const body = changePasswordSchema.parse(request.body ?? {});
-    await auth.changePassword(request.auth!.userId, body.currentPassword, body.newPassword, makeCtx(request, request.auth!.userId));
-    return { changed: true };
+    const revokedSessions = await auth.changePassword(
+      request.auth!.userId,
+      body.currentPassword,
+      body.newPassword,
+      makeCtx(request, request.auth!.userId),
+      request.auth!.sessionId,
+    );
+    return { changed: true, revokedSessions };
   });
 
   /** ------------------------------------------------------------- two-factor */

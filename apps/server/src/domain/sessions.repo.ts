@@ -11,6 +11,8 @@ export interface DeviceRow {
   user_id: string;
   name: string;
   platform: 'web' | 'android' | 'ios' | 'desktop' | 'unknown';
+  /** Stable client-supplied install id; null for rows created before 0007 or without one. */
+  install_key?: string | null;
   push_token: string | null;
   /** Small JSON bag for public device metadata (e.g. the published Kyber prekey). */
   metadata?: Record<string, unknown>;
@@ -41,13 +43,52 @@ export class SessionsRepo {
     userId: string;
     name: string;
     platform: DeviceRow['platform'];
+    installKey?: string | null;
   }): Promise<DeviceRow> {
     return this.db.oneOrFail<DeviceRow>(
-      `insert into devices (user_id, name, platform) values ($1, $2, $3)
-       returning id, user_id, name, platform, push_token, last_seen_at, created_at, revoked_at`,
-      [input.userId, input.name, input.platform],
+      `insert into devices (user_id, name, platform, install_key) values ($1, $2, $3, $4)
+       returning id, user_id, name, platform, install_key, push_token, last_seen_at, created_at, revoked_at`,
+      [input.userId, input.name, input.platform, input.installKey ?? null],
       'service_unavailable',
     );
+  }
+
+  /**
+   * Finds the user's own device row for an install. Scoped to `userId` on purpose: an install key
+   * is not a credential, so it must never be able to point at somebody else's device.
+   */
+  findDeviceByInstallKey(userId: string, installKey: string): Promise<DeviceRow | null> {
+    return this.db.one<DeviceRow>(
+      `select id, user_id, name, platform, install_key, push_token, last_seen_at, created_at, revoked_at
+       from devices where user_id = $1 and install_key = $2 and revoked_at is null`,
+      [userId, installKey],
+    );
+  }
+
+  async touchDevice(deviceId: string): Promise<void> {
+    await this.db.query('update devices set last_seen_at = now() where id = $1', [deviceId]);
+  }
+
+  /** A reused install can report a different name (e.g. the user renamed it); refresh it. */
+  async renameDevice(deviceId: string, name: string): Promise<void> {
+    await this.db.query('update devices set name = $2 where id = $1', [deviceId, name]);
+  }
+
+  /**
+   * Revokes the live sessions of one device.
+   *
+   * A device install holds a single session: signing in again on the same install replaces it, so
+   * repeated logins can no longer march the account towards the session cap. The E2EE account is
+   * untouched — the ratchets live client-side, keyed by the (now stable) device id.
+   */
+  async revokeDeviceSessions(userId: string, deviceId: string, reason: string): Promise<number> {
+    const revoked = await this.db.many<{ id: string }>(
+      `update sessions set revoked_at = now(), revoked_reason = $3
+       where user_id = $1 and device_id = $2 and revoked_at is null
+       returning id`,
+      [userId, deviceId, reason],
+    );
+    return revoked.length;
   }
 
   listDevices(userId: string): Promise<DeviceRow[]> {
@@ -80,10 +121,6 @@ export class SessionsRepo {
       `update devices set metadata = coalesce(metadata, '{}'::jsonb) || $2::jsonb where id = $1`,
       [deviceId, JSON.stringify(patch)],
     );
-  }
-
-  async touchDevice(deviceId: string): Promise<void> {
-    await this.db.query('update devices set last_seen_at = now() where id = $1', [deviceId]);
   }
 
   async createSession(input: {
@@ -141,6 +178,26 @@ export class SessionsRepo {
       'update sessions set revoked_at = now(), revoked_reason = $2 where id = $1 and revoked_at is null',
       [sessionId, reason],
     );
+  }
+
+  /**
+   * Revokes every live session of one user — what a password change/reset must do, and the way out
+   * of a full session table for the legitimate owner.
+   *
+   * `exceptSessionId` keeps the caller's own session alive, so changing a password does not sign the
+   * user out of the device they are standing at.
+   */
+  async revokeAllForUser(userId: string, reason: string, exceptSessionId?: string | null): Promise<number> {
+    // `is distinct from` (not `<>` plus a null-cast dance) keeps the caller's own session alive
+    // whether or not one was supplied, and the result comes from `returning` so the count never
+    // depends on driver-specific row-count bookkeeping.
+    const revoked = await this.db.many<{ id: string }>(
+      `update sessions set revoked_at = now(), revoked_reason = $2
+       where user_id = $1 and revoked_at is null and id is distinct from $3
+       returning id`,
+      [userId, reason, exceptSessionId ?? null],
+    );
+    return revoked.length;
   }
 
   /** Reuse detection: revoke every session that shares the token family. */

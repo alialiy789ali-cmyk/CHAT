@@ -6,7 +6,15 @@ import { CACHE_KEYS } from '../lib/cache.js';
 import { newDeviceEmail, verificationEmail, passwordResetEmail } from '../lib/mail.js';
 import { passwordSchema, usernameSchema } from '@sovereign/shared/validation';
 import { toSelfUser, type UserRow } from '../domain/users.repo.js';
+import type { DeviceRow } from '../domain/sessions.repo.js';
 import type { AppDeps, RequestContext } from './context.js';
+
+/** What a client tells us about itself on register/login (see `deviceSchema` in shared). */
+type DeviceInput = {
+  name?: string;
+  platform: 'web' | 'android' | 'ios' | 'desktop' | 'unknown';
+  key?: string;
+};
 
 /**
  * Authentication & account lifecycle.
@@ -159,7 +167,8 @@ export class AuthService {
     }
 
     if (needsRehash(user.password_hash)) {
-      // Opportunistic upgrade to the strongest available KDF.
+      // Opportunistic upgrade to the strongest available KDF. This is *not* a password change: it
+      // must leave every existing session (on this device and the others) alone.
       await this.deps.repos.users.updatePassword(user.id, await hashPassword(input.password));
       this.deps.logger.info({ userId: user.id }, 'password hash upgraded');
     }
@@ -179,6 +188,39 @@ export class AuthService {
     return result;
   }
 
+  /**
+   * Returns the device row this request belongs to.
+   *
+   * With a client-supplied install key the row is reused and only refreshed, which is what keeps a
+   * browser's E2EE identity, one-time key pool and session stable across sign-ins. Without one
+   * (older clients, or a caller that does not identify itself) a row is created as before, so the
+   * endpoint stays backwards compatible.
+   */
+  private async resolveDevice(user: UserRow, device: DeviceInput | undefined, ctx: RequestContext): Promise<DeviceRow> {
+    const name = (device?.name ?? guessDeviceName(ctx.userAgent)).slice(0, 80);
+    const platform = device?.platform ?? 'web';
+    const installKey = device?.key ?? null;
+
+    if (installKey) {
+      const existing = await this.deps.repos.sessions.findDeviceByInstallKey(user.id, installKey);
+      if (existing) {
+        await this.deps.repos.sessions.touchDevice(existing.id);
+        if (existing.name !== name) await this.deps.repos.sessions.renameDevice(existing.id, name);
+        return existing;
+      }
+      try {
+        return await this.deps.repos.sessions.createDevice({ userId: user.id, name, platform, installKey });
+      } catch (error) {
+        // Lost a race with a parallel sign-in from the same install: the row now exists, take it.
+        const raced = await this.deps.repos.sessions.findDeviceByInstallKey(user.id, installKey);
+        if (raced) return raced;
+        throw error;
+      }
+    }
+
+    return this.deps.repos.sessions.createDevice({ userId: user.id, name, platform });
+  }
+
   private async enforceLoginThrottle(identifier: string, ip: string | null): Promise<void> {
     const byIdentifier = await this.deps.repos.sessions.recentFailures(identifier, 15);
     const byIp = ip ? await this.deps.repos.sessions.recentFailuresByIp(ip, 15) : 0;
@@ -195,27 +237,23 @@ export class AuthService {
 
   private async createSessionFor(
     user: UserRow,
-    device: { name?: string; platform: 'web' | 'android' | 'ios' | 'desktop' | 'unknown' } | undefined,
+    device: DeviceInput | undefined,
     ctx: RequestContext,
     origin: 'register' | 'login' | 'refresh',
   ): Promise<AuthResult> {
     const cfg = this.deps.cfg;
+    // Resolve the install first: signing in again on a known install replaces that install's own
+    // session, so the cap below counts *devices*, not logins.
+    const deviceRow = await this.resolveDevice(user, device, ctx);
+    const replaced = await this.deps.repos.sessions.revokeDeviceSessions(user.id, deviceRow.id, 'replaced_by_login');
+    if (replaced > 0) {
+      this.deps.logger.info({ userId: user.id, deviceId: deviceRow.id, replaced }, 'previous device session replaced');
+    }
+
     const activeSessions = await this.deps.repos.sessions.countActiveSessions(user.id);
     if (activeSessions >= cfg.MAX_ACTIVE_SESSIONS) {
       throw new AppError('too_many_sessions', `maximum ${cfg.MAX_ACTIVE_SESSIONS} active sessions`);
     }
-
-    const deviceRow = device?.name
-      ? await this.deps.repos.sessions.createDevice({
-          userId: user.id,
-          name: device.name.slice(0, 80),
-          platform: device.platform,
-        })
-      : await this.deps.repos.sessions.createDevice({
-          userId: user.id,
-          name: guessDeviceName(ctx.userAgent),
-          platform: device?.platform ?? 'web',
-        });
 
     const refresh = this.deps.tokens.issueRefreshToken();
     const session = await this.deps.repos.sessions.createSession({
@@ -412,12 +450,17 @@ export class AuthService {
     if (consumed.reused) throw new AppError('invalid_token', 'reset_token_used');
     if (consumed.expired) throw new AppError('token_expired', 'reset_token_expired');
     await this.deps.repos.users.updatePassword(consumed.user_id, await hashPassword(newPassword));
+    // Whoever held a session before the reset loses it: a stolen refresh token must not survive the
+    // recovery flow, and this is also how the owner gets back in when the session table is full.
+    const revoked = await this.deps.repos.sessions.revokeAllForUser(consumed.user_id, 'password_reset');
+    this.deps.logger.info({ userId: consumed.user_id, revoked }, 'sessions revoked after password reset');
     await this.deps.repos.audit.record({
       actorId: consumed.user_id,
       actorIp: ctx.ip,
       action: 'auth.password_reset_completed',
       targetType: 'user',
       targetId: consumed.user_id,
+      metadata: { revokedSessions: revoked },
     });
   }
 
@@ -426,20 +469,25 @@ export class AuthService {
     currentPassword: string,
     newPassword: string,
     ctx: RequestContext,
-  ): Promise<void> {
+    currentSessionId?: string | null,
+  ): Promise<number> {
     const user = await this.deps.repos.users.findById(userId);
     if (!user) throw new AppError('user_not_found');
     const ok = await verifyPassword(currentPassword, user.password_hash);
     if (!ok) throw new AppError('invalid_credentials', 'current_password_wrong');
     assert(passwordSchema.safeParse(newPassword).success, 'validation_error', 'password_policy');
     await this.deps.repos.users.updatePassword(userId, await hashPassword(newPassword));
+    // Other devices are signed out; the caller stays signed in.
+    const revoked = await this.deps.repos.sessions.revokeAllForUser(userId, 'password_changed', currentSessionId);
     await this.deps.repos.audit.record({
       actorId: userId,
       actorIp: ctx.ip,
       action: 'auth.password_changed',
       targetType: 'user',
       targetId: userId,
+      metadata: { revokedSessions: revoked },
     });
+    return revoked;
   }
 
   /** ------------------------------------------------------------------ two-factor (TOTP) */

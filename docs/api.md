@@ -53,6 +53,9 @@
 | --- | --- | --- |
 | POST | `/auth/register` | `{username, email, password, displayName?, device?}` → `{user, accessToken, refreshToken, expiresIn, sessionId, deviceId}` (201) |
 | POST | `/auth/login` | `{identifier, password, totp?, device?}` → نفس الشكل. `totp_required` عند تفعيل التحقق بخطوتين |
+| POST | `/auth/password/change` | `{currentPassword, newPassword}` → `{changed, revokedSessions}` — ينهي جلسات **الأجهزة الأخرى** ويُبقي جلسة الجالس أمام الجهاز |
+| POST | `/auth/password/request-reset` | `{email}` → `{sent: true}` دائماً (لا كشف للحسابات)؛ الرابط في البريد صالح 30 دقيقة |
+| POST | `/auth/password/reset` | `{token, newPassword}` → `{reset: true}` — يُنهي **كل** الجلسات، وهو طريق الاستعادة عند امتلاء جدول الجلسات |
 | POST | `/auth/refresh` | يقرأ الكوكي أو `{refreshToken}` → رموز جديدة (تدوير إلزامي) |
 | POST | `/auth/logout` \| `/auth/logout-all` | إلغاء الجلسة الحالية / كل الجلسات |
 | — | — | ملاحظة: عند بلوغ `MAX_ACTIVE_SESSIONS` (10 افتراضياً) يفشل الدخول بـ403 `too_many_sessions` بدل إسقاط جلسة قائمة |
@@ -76,7 +79,7 @@
 | POST | `/users/me/avatar` | multipart (حقل `file`) |
 | GET | `/users/me/export` | تصدير JSON كامل (يُبنى عند الطلب) |
 | DELETE | `/users/me` | حذف الحساب (إخفاء هوية + إلغاء الجلسات) |
-| GET/DELETE | `/users/me/devices[/:deviceId]` | الأجهزة |
+| GET/DELETE | `/users/me/devices[/:deviceId]` | الأجهزة. هوية الجهاز = **تثبيت** لا تسجيل دخول: يُرسل العميل `device.key` ثابتاً (مُولَّد محلياً في `localStorage`، ليس سرّاً ولا يصلح وحده للمصادقة) فيُعاد استخدام صفّ الجهاز نفسه عند الدخول مجدداً |
 | GET | `/users/me/blocks` | قائمة الحظر |
 | GET | `/users/:username` | `{user, stats, viewer, posts, online}` |
 | POST/DELETE | `/users/:username/follow` \| `/users/:username/block` | متابعة/حظر بالاسم |

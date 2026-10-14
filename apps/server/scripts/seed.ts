@@ -195,6 +195,17 @@ async function main(): Promise<void> {
     }
   }
 
+  // ---------------------------------------------------------------- demo hygiene
+  // Demo accounts are signed in from browsers, scripted checks and test runners, and every sign-in
+  // leaves a session behind. Clearing the demo users' live sessions keeps `MAX_ACTIVE_SESSIONS` from
+  // ever making the walkthrough unreachable — the same thing `POST /api/auth/password/reset` does for
+  // a real user. Devices (and any published E2EE keys) are deliberately left untouched.
+  let releasedSessions = 0;
+  for (const user of [alice, bob, moderator, e2eeA, e2eeB, e2eeC]) {
+    releasedSessions += await deps.repos.sessions.revokeAllForUser(user.id, 'seed_refresh');
+  }
+  if (releasedSessions > 0) logger.info({ releasedSessions }, 'demo sessions released');
+
   logger.info('seed complete');
   console.log('\nDemo accounts (development only):');
   for (const user of [alice, bob, moderator, e2eeA, e2eeB, e2eeC]) {

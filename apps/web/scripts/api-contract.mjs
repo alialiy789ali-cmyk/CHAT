@@ -13,9 +13,21 @@ const call = async (path, { method = 'GET', token, body, raw } = {}) => {
 };
 const stamp = Date.now().toString(36);
 
-/** Logs in and returns the access token + user id (or null when the account does not exist). */
-const loginAs = async (username, password = 'Sovereign-Demo-2026') => {
-  const res = await call('/api/auth/login', { method: 'POST', body: { identifier: username, password } });
+/**
+ * Logs in and returns the access token + user id (or null when the account does not exist).
+ *
+ * The install key is stable per account so repeated runs reuse one device row: without it every run
+ * would add a device, orphan its E2EE keys and walk the account towards MAX_ACTIVE_SESSIONS.
+ */
+const loginAs = async (username, password = 'Sovereign-Demo-2026', installKey = `contract-runner-${username}`) => {
+  const res = await call('/api/auth/login', {
+    method: 'POST',
+    body: {
+      identifier: username,
+      password,
+      device: { name: 'contract runner', platform: 'web', key: installKey },
+    },
+  });
   if (res.status !== 200 || !res.json?.accessToken) return null;
   const me = await call('/api/users/me', { token: res.json.accessToken });
   const sessions = await call('/api/auth/sessions', { token: res.json.accessToken });
@@ -132,7 +144,14 @@ const token = reg.json?.accessToken;
 const me = await call('/api/users/me', { token });
 ok('GET /users/me matches Viewer shape', me.status === 200 && typeof me.json?.username === 'string' && typeof me.json?.privacy?.readReceipts === 'boolean' && typeof me.json?.stats?.followers === 'number' && typeof me.json?.theme === 'string');
 
-const login = await call('/api/auth/login', { method: 'POST', body: { identifier: 'layla', password: 'Sovereign-Demo-2026' } });
+const login = await call('/api/auth/login', {
+  method: 'POST',
+  body: {
+    identifier: 'layla',
+    password: 'Sovereign-Demo-2026',
+    device: { name: 'contract runner', platform: 'web', key: 'contract-runner-layla' },
+  },
+});
 ok('seed login layla', login.status === 200);
 const layla = login.json?.accessToken;
 const laylaMe = await call('/api/users/me', { token: layla });
@@ -344,7 +363,8 @@ console.log('\n[7] end-to-end encryption through the web origin (real Olm)');
     ok('the recipient decrypts the original text', decrypted === secret, decrypted);
 
     // A second device of the same user (a new login) has no envelope for that message.
-    const bobSecondDevice = await loginAs('cipher_b');
+    // A *second install* of the same user: same account, different device row.
+  const bobSecondDevice = await loginAs('cipher_b', 'Sovereign-Demo-2026', 'contract-runner-cipher_b-second');
     const otherDevice = await call(`/api/messages/${stored.json.message.id}/envelope`, { token: bobSecondDevice.token });
     ok('a different device of the same user gets no envelope', otherDevice.json?.envelope === null, JSON.stringify(otherDevice.json)?.slice(0, 120));
     const ownerDevice = await call(`/api/messages/${stored.json.message.id}/envelope`, { token: bob.token });

@@ -109,7 +109,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const login = useCallback(
     async (identifier: string, password: string, totp?: string) => {
-      await api.login(identifier, password, totp);
+      await api.login(identifier, password, { totp });
       await refreshViewer();
       router.push('/app');
     },

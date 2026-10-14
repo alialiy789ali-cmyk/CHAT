@@ -29,9 +29,15 @@ const BASE = process.env.E2EE_API_URL ?? 'http://127.0.0.1:8787';
  * `cipher_c` intentionally never publishes keys — it is the member who cannot receive encrypted
  * messages, which is what the refusal check below needs.
  */
-async function loginSeeded(username: string): Promise<ApiClient> {
+/**
+ * Signs a seeded account in.
+ *
+ * The install key is derived from the account name so repeated runs reuse one device row: a fresh
+ * device every run would publish another set of keys and leave the previous ones unreachable.
+ */
+async function loginSeeded(username: string, installKey = `e2ee-live-${username}`): Promise<ApiClient> {
   const client = newClient();
-  await client.login(username, 'Sovereign-Demo-2026');
+  await client.login(username, 'Sovereign-Demo-2026', { installKey });
   return client;
 }
 
@@ -85,7 +91,7 @@ async function createAccount(label: string): Promise<Account> {
 
   let userId: string;
   try {
-    const loggedIn = await client.login(username, password);
+    const loggedIn = await client.login(username, password, { installKey: `e2ee-live-${username}` });
     userId = loggedIn.user.id;
   } catch (loginError) {
     // An explicit pair that does not work is an error; otherwise fall back to registering, which
@@ -270,7 +276,9 @@ async function runChecks(alice: Account, bob: Account): Promise<void> {
     // A second device for bob, published with a **single** one-time key and then left alone: the
     // first bundle fetch consumes that key, so the device becomes unaddressable — exactly what a
     // phone that was lost or reinstalled looks like to everyone else.
-    const staleClient = await loginSeeded('cipher_b');
+    // A *second install* of the same user: it must be a different device row, otherwise consuming
+    // its only one-time key would break the device under test instead of simulating a stale phone.
+    const staleClient = await loginSeeded('cipher_b', 'e2ee-live-cipher_b-stale-install');
     const staleDeviceId = (await staleClient.get<Array<{ deviceId: string | null; current: boolean }>>('/api/auth/sessions')).find(
       (session) => session.current,
     )?.deviceId;

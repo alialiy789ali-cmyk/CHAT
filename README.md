@@ -8,7 +8,8 @@ timeline and peer-to-peer audio/video calls — running entirely on infrastructu
 
 [![license](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](LICENSE)
 ![node](https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg)
-![tests](https://img.shields.io/badge/tests-40%20passing-brightgreen.svg)
+![tests](https://img.shields.io/badge/server%20tests-57%20passing-brightgreen.svg)
+![web e2ee](https://img.shields.io/badge/web%20e2ee%20checks-40%20passing-brightgreen.svg)
 
 ---
 
@@ -48,9 +49,9 @@ npm run seed                # بيانات تجريبية + حسابات للد�
 ثم افتح <http://localhost:3000> وسجّل الدخول بـ `layla` / `Sovereign-Demo-2026`.
 
 ```bash
-npm run test:all            # 36 اختبار وحدة + 18 اختبار قبول شامل
-npm run smoke               # فحص شامل ضد خادم يعمل فعلاً
-npm run check:api           # 42 فحصاً لعقود الواجهة (REST + WebSocket + الوسائط) بين الويب والخادم
+npm run test:all            # 36 اختبار وحدة + 21 اختبار قبول شامل (معايير 1–25)
+npm run smoke               # 9 فحوص ضد خادم يعمل فعلاً
+npm run check:api           # 67 فحصاً لعقود الواجهة (REST + WebSocket + E2EE حقيقي) بين الويب والخادم
 npm run typecheck           # فحص الأنواع في الخادم والویب
 ```
 

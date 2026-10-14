@@ -26,7 +26,8 @@ export function uniqueEmail(prefix = 'user'): string {
 }
 
 export class ApiClient {
-  private accessToken: string | null = null;
+  /** Public so a test can assert that a *previous* session's token was really revoked. */
+  accessToken: string | null = null;
   refreshToken: string | null = null;
   userId: string | null = null;
   deviceId: string | null = null;
@@ -80,7 +81,14 @@ export class ApiClient {
     return { status: response.status, bytes: buffer, headers: response.headers };
   }
 
-  async register(input?: { username?: string; email?: string; password?: string; displayName?: string }) {
+  async register(input?: {
+    username?: string;
+    email?: string;
+    password?: string;
+    displayName?: string;
+    /** Stable install key (see migration 0007) so repeat logins reuse the same device row. */
+    deviceKey?: string;
+  }) {
     const username = input?.username ?? uniqueUsername();
     const email = input?.email ?? uniqueEmail(username);
     const password = input?.password ?? 'Sovereign-Test-Passw0rd';
@@ -90,7 +98,13 @@ export class ApiClient {
       refreshToken: string;
       deviceId: string;
     }>('POST', '/api/auth/register', {
-      body: { username, email, password, displayName: input?.displayName ?? username, device: { name: 'Test runner', platform: 'web' } },
+      body: {
+        username,
+        email,
+        password,
+        displayName: input?.displayName ?? username,
+        device: { name: 'Test runner', platform: 'web', key: input?.deviceKey },
+      },
       token: null,
     });
     if (res.status !== 201) throw new Error(`register failed (${res.status}): ${JSON.stringify(res.body)}`);
@@ -103,16 +117,26 @@ export class ApiClient {
     return res.body;
   }
 
-  async login(identifier: string, password: string) {
-    const res = await this.request<{ accessToken: string; refreshToken: string; user: { id: string } }>(
-      'POST',
-      '/api/auth/login',
-      { body: { identifier, password, device: { name: 'Second device', platform: 'web' } }, token: null },
-    );
+  async login(identifier: string, password: string, device?: { name?: string; key?: string }) {
+    const res = await this.request<{
+      accessToken: string;
+      refreshToken: string;
+      user: { id: string };
+      deviceId: string;
+      sessionId: string;
+    }>('POST', '/api/auth/login', {
+      body: {
+        identifier,
+        password,
+        device: { name: device?.name ?? 'Second device', platform: 'web', key: device?.key },
+      },
+      token: null,
+    });
     if (res.status !== 200) throw new Error(`login failed (${res.status}): ${JSON.stringify(res.body)}`);
     this.accessToken = res.body.accessToken;
     this.refreshToken = res.body.refreshToken;
     this.userId = res.body.user.id;
+    this.deviceId = res.body.deviceId ?? null;
     return res.body;
   }
 

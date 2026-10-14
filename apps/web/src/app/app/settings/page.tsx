@@ -311,8 +311,16 @@ function SecuritySection() {
         <Button
           onClick={async () => {
             try {
-              await api.post('/api/auth/password/change', { currentPassword, newPassword });
-              setStatus('تم تغيير كلمة المرور وإلغاء كل الجلسات الأخرى.');
+              const res = await api.post<{ revokedSessions: number }>('/api/auth/password/change', {
+                currentPassword,
+                newPassword,
+              });
+              // The caller's own session survives a password change; the others are revoked.
+              setStatus(
+                res.revokedSessions > 0
+                  ? `تم تغيير كلمة المرور، وتم إنهاء ${res.revokedSessions} جلسة على أجهزة أخرى. هذا الجهاز ما زال مسجّلاً.`
+                  : 'تم تغيير كلمة المرور. لم تكن هناك جلسات أخرى لإنهائها.',
+              );
               setCurrentPassword('');
               setNewPassword('');
             } catch {
