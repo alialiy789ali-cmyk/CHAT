@@ -148,8 +148,10 @@ export class E2eeEngine {
     const result = await this.client.get<{ devices: E2eeDeviceDescriptor[] }>(`/api/keys/${userId}/devices`);
     const usable: E2eeDeviceDescriptor[] = [];
     for (const device of result.devices) {
-      if (device.algorithm !== 'olm-v1') continue;
-      if (!this.device.verifyBundle(device)) {
+      // Olm devices sign their identity key, so a substituted bundle is caught here. Signal devices
+      // carry no such signature; their authentication happens when the session is built (the signed
+      // prekey is verified against the identity key inside the protocol), so they are kept as-is.
+      if (device.signingKey && device.identitySignature && !this.device.verifyBundle(device)) {
         console.warn('dropped a device with an invalid identity signature', device.deviceId);
         continue;
       }
@@ -209,10 +211,20 @@ export class E2eeEngine {
     envelopes: MessageEnvelope[];
     skipped: Array<{ userId: string; reason: string }>;
     unreachable: Array<{ userId: string; deviceId: string; reason: string }>;
+    schemeMismatches: Array<{ userId: string; deviceId: string; algorithm: string }>;
   }> {
     const envelopes: MessageEnvelope[] = [];
     const skipped: Array<{ userId: string; reason: string }> = [];
     const unreachable: Array<{ userId: string; deviceId: string; reason: string }> = [];
+    /**
+     * Devices that speak a scheme this client cannot produce.
+     *
+     * The two schemes are both industry implementations, chosen for what runs where: Olm is
+     * WebAssembly (browsers only) and libsignal has a pure-JavaScript build (phones). Dropping such a
+     * device silently would show the message as delivered while its owner reads a locked bubble, so
+     * it is reported and the composer warns.
+     */
+    const schemeMismatches: Array<{ userId: string; deviceId: string; algorithm: string }> = [];
     const targets = [...new Set(conversation.participants.map((participant) => participant.userId))];
 
     for (const userId of targets) {
@@ -237,8 +249,13 @@ export class E2eeEngine {
         continue;
       }
 
-      const needSession: string[] = [];
+      const ownScheme = directory.filter((device) => device.algorithm === 'olm-v1');
       for (const device of directory) {
+        if (device.algorithm !== 'olm-v1') schemeMismatches.push({ userId, deviceId: device.deviceId, algorithm: device.algorithm });
+      }
+
+      const needSession: string[] = [];
+      for (const device of ownScheme) {
         if (device.deviceId === skipDeviceId) continue;
         if (!(await this.device.hasStoredSession(device.deviceId))) needSession.push(device.deviceId);
       }
@@ -258,7 +275,7 @@ export class E2eeEngine {
       }
 
       let addressedCount = 0;
-      for (const device of directory) {
+      for (const device of ownScheme) {
         if (device.deviceId === skipDeviceId) {
           addressedCount += 1;
           continue;
@@ -293,7 +310,7 @@ export class E2eeEngine {
         }
       }
     }
-    return { envelopes, skipped, unreachable };
+    return { envelopes, skipped, unreachable, schemeMismatches };
   }
 
   /** Decrypts an envelope for this device and remembers the plaintext locally. */

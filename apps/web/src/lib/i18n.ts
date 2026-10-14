@@ -149,8 +149,8 @@ const strings: Dict = {
   },
   securityCenter: { ar: 'مركز الأمان', en: 'Security centre' },
   someDevicesUnreachable: {
-    ar: 'أُرسلت الرسالة، لكن بعض أجهزة المشاركين غير قابلة للوصول حالياً (جهاز قديم أو نفدت مفاتيحه) — لن تُقرأ عليه حتى يعود.',
-    en: 'Message sent, but some participant devices are unreachable right now (an old device, or an exhausted key pool) — they will not read it until they return.',
+    ar: 'أُرسلت الرسالة، لكن بعض أجهزة المشاركين لن تقرأها: جهاز قديم نفدت مفاتيحه، أو جهاز يستخدم مخطط تشفير آخر (تطبيق الجوال مقابل المتصفح).',
+    en: 'Message sent, but some participant devices will not read it: an old device with an exhausted key pool, or a device using the other encryption scheme (mobile app vs. browser).',
   },
   attachmentsNotEncrypted: {
     ar: 'المرفقات غير مشفّرة طرفياً بعد، لذلك تُعطَّل في المحادثات المشفّرة.',

@@ -335,17 +335,20 @@ export function Composer({
       onCancelReply();
       try {
         const status = await engine.conversationStatus(conversationId);
-        const { envelopes, skipped, unreachable } = await engine.encryptForConversation(status, plaintextBody);
+        const { envelopes, skipped, unreachable, schemeMismatches } = await engine.encryptForConversation(
+          status,
+          plaintextBody,
+        );
         if (skipped.length > 0 || envelopes.length === 0) {
           setText(plaintextBody);
           alert(`${tr('e2eeBlocked')} (${skipped.map((entry) => entry.reason).join(', ') || 'no_devices'})`);
           return;
         }
-        if (unreachable.length > 0) {
-          // A device that stopped answering must not freeze the conversation, but the user should
-          // know some of their own devices will not show this message.
-          console.warn('[e2ee] could not address every device', unreachable);
-          setStaleDeviceNotice(unreachable.length);
+        if (unreachable.length > 0 || schemeMismatches.length > 0) {
+          // Neither a device that stopped answering nor one speaking the other scheme may freeze the
+          // conversation — but the sender has to know those devices will not show this message.
+          console.warn('[e2ee] devices that will not receive this message', { unreachable, schemeMismatches });
+          setStaleDeviceNotice(unreachable.length + schemeMismatches.length);
         }
         const result = await api.post<{ message: ChatMessage; duplicated: boolean }>(
           `/api/conversations/${conversationId}/messages`,
