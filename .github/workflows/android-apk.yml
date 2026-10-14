@@ -221,11 +221,18 @@ jobs:
           retention-days: 90
 
   # Publishes the APK as a release asset: on a phone, a release download is a link you can tap,
-  # while artifact downloads need the GitHub UI and a signed-in session.
+  # while artifact downloads need the GitHub UI and a signed-in session — and the GitHub Actions
+  # artifact storage is not reachable from every environment (it is served from a different host that
+  # filters by network), which is exactly why the file has to travel this way.
+  #
+  # Every build publishes a *prerelease* tagged with the branch and the commit, so a build is always
+  # downloadable without anyone having to open the Actions tab; the newest one is simply the newest
+  # tag. Marking them prereleases keeps them out of the repository's "latest release" slot, which
+  # belongs to a real version.
   release:
     name: Attach APK to a release
     needs: apk
-    if: ${{ inputs.publish_release || github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    if: ${{ inputs.publish_release || github.event_name == 'push' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -243,7 +250,8 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           APK=$(ls *.apk | head -n 1)
-          TAG="mobile-$(date +%Y.%m.%d)-${SHA::7}"
+          BRANCH="${GITHUB_REF_NAME//\//-}"
+          TAG="mobile-${BRANCH}-${SHA::7}"
           cat > notes.md <<'NOTES'
           حزمة Android مبنية من هذا المستودع.
 
@@ -253,5 +261,6 @@ jobs:
           - نطاق إصدارات Android يُقرأ من الحزمة نفسها ويُطبع في ملخّص التشغيل (لا نكتبه هنا تخميناً).
           NOTES
           printf '\nعنوان الخادم المضمّن: `%s`\n' "$API_URL" >> notes.md
-          gh release create "$TAG" "$APK" --repo "$REPO" --target "$SHA" --title "تطبيق الجوال $TAG" --notes-file notes.md
+          gh release create "$TAG" "$APK" --repo "$REPO" --target "$SHA" --prerelease \
+            --title "تطبيق الجوال ${BRANCH} ${SHA::7}" --notes-file notes.md
           echo "released $TAG with $APK_FILE"
