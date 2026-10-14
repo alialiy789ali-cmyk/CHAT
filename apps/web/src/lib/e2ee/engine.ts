@@ -14,7 +14,15 @@
 import { api, type ApiClient } from '@/lib/api';
 import { OlmDevice } from './client';
 import { cachePlaintext, loadPlaintext, e2eeStorageAvailable, type CachedPlaintext } from './store';
-import { parseEnvelope, type ConversationEncryptionStatus, type E2eeDeviceBundle, type MessageEnvelope, type OwnDeviceInventory, type PeerDeviceVerification } from './types';
+import {
+  parseEnvelope,
+  type ConversationEncryptionStatus,
+  type E2eeDeviceBundle,
+  type E2eeDeviceDescriptor,
+  type MessageEnvelope,
+  type OwnDeviceInventory,
+  type PeerDeviceVerification,
+} from './types';
 
 /** Everything the UI needs to describe this device's encryption state honestly. */
 export interface E2eeStatus {
@@ -128,6 +136,28 @@ export class E2eeEngine {
     return usable;
   }
 
+  /**
+   * The user's current devices, straight from the directory endpoint.
+   *
+   * Never cached and free of side effects: it is called before every send so a device that appeared
+   * a moment ago is addressed. Devices whose Ed25519 signature does not verify against their
+   * identity key are dropped here — the same rule as bundles, since this list decides who gets a
+   * copy of the plaintext.
+   */
+  async deviceDirectory(userId: string): Promise<E2eeDeviceDescriptor[]> {
+    const result = await this.client.get<{ devices: E2eeDeviceDescriptor[] }>(`/api/keys/${userId}/devices`);
+    const usable: E2eeDeviceDescriptor[] = [];
+    for (const device of result.devices) {
+      if (device.algorithm !== 'olm-v1') continue;
+      if (!this.device.verifyBundle(device)) {
+        console.warn('dropped a device with an invalid identity signature', device.deviceId);
+        continue;
+      }
+      usable.push(device);
+    }
+    return usable;
+  }
+
   /** Drops cached bundles, e.g. after a device list change or a verification. */
   invalidateBundles(userId?: string): void {
     if (userId) this.bundleCache.delete(userId);
@@ -186,24 +216,59 @@ export class E2eeEngine {
     const targets = [...new Set(conversation.participants.map((participant) => participant.userId))];
 
     for (const userId of targets) {
-      let bundles: E2eeDeviceBundle[] = [];
+      /**
+       * Directory first, keys second.
+       *
+       * The directory says *who exists right now* and costs nothing; one-time keys are claimed only
+       * for devices that do not have a ratchet yet, because claiming is destructive (the server hands
+       * out a key once). Without this split a sender that cached its list would silently skip a
+       * device created after the cache was filled — its owner would see a locked bubble while the
+       * message looked delivered to everyone else.
+       */
+      let directory: E2eeDeviceDescriptor[] = [];
       try {
-        bundles = await this.bundlesFor(userId);
+        directory = await this.deviceDirectory(userId);
       } catch (error) {
-        skipped.push({ userId, reason: error instanceof Error ? error.message : 'bundle_unavailable' });
+        skipped.push({ userId, reason: error instanceof Error ? error.message : 'directory_unavailable' });
         continue;
       }
-      if (bundles.length === 0) {
+      if (directory.length === 0) {
         skipped.push({ userId, reason: 'no_usable_devices' });
         continue;
       }
 
+      const needSession: string[] = [];
+      for (const device of directory) {
+        if (device.deviceId === skipDeviceId) continue;
+        if (!(await this.device.hasStoredSession(device.deviceId))) needSession.push(device.deviceId);
+      }
+
+      // Claim keys once for the user whose devices still need a handshake. The call issues a key per
+      // device of that user, including devices that already have a ratchet; that is the price of the
+      // endpoint's shape, and it only happens while some device of theirs is new.
+      const claimed = new Map<string, E2eeDeviceBundle>();
+      if (needSession.length > 0) {
+        try {
+          for (const bundle of await this.bundlesFor(userId, { fresh: true })) claimed.set(bundle.deviceId, bundle);
+        } catch (error) {
+          // A claim failure is not fatal on its own: devices that already have a ratchet still work,
+          // and the missing ones surface as `unreachable` below.
+          console.warn('[e2ee] could not claim one-time keys for', userId, error);
+        }
+      }
+
       let addressedCount = 0;
-      for (const bundle of bundles) {
-        if (bundle.deviceId === skipDeviceId) {
+      for (const device of directory) {
+        if (device.deviceId === skipDeviceId) {
           addressedCount += 1;
           continue;
         }
+        const bundle: E2eeDeviceBundle = {
+          ...device,
+          algorithm: 'olm-v1',
+          registrationId: claimed.get(device.deviceId)?.registrationId ?? 0,
+          oneTimePreKey: claimed.get(device.deviceId)?.oneTimePreKey,
+        };
         try {
           const { envelope } = await this.device.encryptFor(bundle, plaintext);
           envelopes.push(envelope);
@@ -304,9 +369,14 @@ export class E2eeEngine {
    */
   peers: Array<{ deviceId: string; identityKey: string }> = [];
 
-  /** All devices of a peer, for the verification screen. */
-  async peerDevices(userId: string): Promise<E2eeDeviceBundle[]> {
-    return this.bundlesFor(userId);
+  /**
+   * All devices of a peer, for the verification screen.
+   *
+   * Uses the directory, not bundles: comparing safety numbers must not consume one-time keys, and it
+   * must show exactly the device set that sending would address.
+   */
+  async peerDevices(userId: string): Promise<E2eeDeviceDescriptor[]> {
+    return this.deviceDirectory(userId);
   }
 
   /** Forgets every ratchet with the given peer devices (used when their identity changes). */

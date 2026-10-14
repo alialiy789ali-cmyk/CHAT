@@ -50,13 +50,24 @@ export function serializeEnvelope(payload: OlmEnvelopePayload): string {
 }
 
 /** A device's public bundle as returned by `GET /api/keys/:userId`. */
-export interface E2eeDeviceBundle {
+/**
+ * A device as the **directory** describes it: who exists, and which keys identify them.
+ *
+ * `GET /api/keys/:userId/devices` returns this without claiming anything, which is what makes it
+ * safe to call before every send — a device that appeared since the last message has to be
+ * addressed, and refreshing the list must not drain anybody's one-time key pool.
+ */
+export interface E2eeDeviceDescriptor {
   deviceId: string;
-  algorithm: Exclude<EncryptionScheme, 'none'>;
-  registrationId: number;
+  algorithm: EncryptionScheme;
   identityKey: string;
   signingKey?: string;
   identitySignature?: string;
+}
+
+export interface E2eeDeviceBundle extends E2eeDeviceDescriptor {
+  algorithm: Exclude<EncryptionScheme, 'none'>;
+  registrationId: number;
   /** Field name matches the API DTO in `GET /api/keys/:userId`. */
   oneTimePreKey?: { id: string | number; publicKey: string };
 }

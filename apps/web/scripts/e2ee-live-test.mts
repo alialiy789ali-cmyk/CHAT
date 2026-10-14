@@ -375,6 +375,63 @@ async function runChecks(alice: Account, bob: Account): Promise<void> {
   }
   check('a tampered envelope is rejected', tamperDetected);
 
+
+  console.log("[11] the sender's own other devices can read what this device sent (self-sync)");
+  // A second install of the *same* account: different device row, different Olm identity, same user.
+  // This is the case a phone/browser pair hits every day, and it is the reason the sender must also
+  // address its own devices instead of only the other participants.
+  const secondClient = await loginSeeded(alice.username, `e2ee-selfsync-${suffix}`);
+  const secondDeviceId = (
+    await secondClient.get<Array<{ deviceId: string | null; current: boolean }>>('/api/auth/sessions')
+  ).find((session) => session.current)?.deviceId;
+  check(
+    'the second install is a different device',
+    Boolean(secondDeviceId) && secondDeviceId !== alice.deviceId,
+    secondDeviceId,
+  );
+  const secondEngine = await E2eeEngine.create(alice.userId, secondDeviceId!, secondClient);
+
+  const selfSecret = 'رسالة من الجهاز الأول — ويجب أن يقرأها الجهاز الثاني لنفس الحساب';
+  const outbound = await alice.engine.encryptForConversation(
+    await alice.engine.conversationStatus(conversationId),
+    selfSecret,
+  );
+  check(
+    "the sender's own other device is addressed too",
+    outbound.envelopes.some((envelope) => envelope.deviceId === secondDeviceId),
+    outbound.envelopes.map((envelope) => envelope.deviceId),
+  );
+  const selfSent = await alice.client.post<{ message: { id: string } }>(`/api/conversations/${conversationId}/messages`, {
+    clientMessageId: `live-${Date.now()}-sync`,
+    body: '',
+    encryptionScheme: 'olm-v1',
+    envelopes: outbound.envelopes,
+  });
+  await alice.engine.rememberSent({ messageId: selfSent.message.id, conversationId, body: selfSecret });
+
+  // The second device gets only its own envelope and recovers the text on its own.
+  const secondHistory = await secondClient.get<{
+    items: Array<{ id: string; envelopes: Array<{ ciphertext: string }> }>;
+  }>(`/api/conversations/${conversationId}/messages?limit=10`);
+  const secondRow = secondHistory.items.find((item) => item.id === selfSent.message.id);
+  check(
+    'the second device receives exactly its own envelope',
+    secondRow?.envelopes.length === 1,
+    secondRow?.envelopes.length,
+  );
+  const secondText = await secondEngine.decryptEnvelope({
+    messageId: selfSent.message.id,
+    conversationId,
+    senderUserId: alice.userId,
+    envelope: { deviceId: secondDeviceId!, scheme: 'olm-v1', ciphertext: secondRow!.envelopes[0]!.ciphertext },
+    mine: true,
+  });
+  check('the second device decrypted a message it never sent', secondText === selfSecret, secondText);
+  // …while the sending device never needed an envelope for itself: its own plaintext is local.
+  const firstCache = await loadPlaintext(selfSent.message.id, alice.deviceId);
+  check('the sending device kept its own plaintext locally', firstCache?.body === selfSecret, firstCache?.body);
+  await secondClient.post('/api/auth/logout').catch(() => {});
+
   console.log(`\n${failures.length === 0 ? 'PASS' : 'FAIL'} — ${passed} checks passed, ${failures.length} failed`);
   if (failures.length > 0) {
     for (const failure of failures) console.error(`  - ${failure}`);

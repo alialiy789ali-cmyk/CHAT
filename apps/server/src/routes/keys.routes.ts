@@ -88,6 +88,20 @@ export async function registerKeyRoutes(app: FastifyInstance, container: Service
     keys.inventory(request.auth!.userId),
   );
 
+  /**
+   * Device directory: *who* has keys, without claiming anything.
+   *
+   * A sender has to know the current device list before it encrypts — a device that appeared after
+   * the last send must be addressed, or its owner reads a locked bubble. Claiming one-time keys from
+   * this endpoint would make every such refresh drain the recipient's pool, so the directory is
+   * free of side effects and the one-time keys are claimed only where a session is actually built
+   * (`GET /keys/:userId`).
+   */
+  app.get('/keys/:userId/devices', { preHandler: [app.authenticate], schema: { tags: ['e2ee'] } }, async (request) => {
+    const { userId } = request.params as { userId: string };
+    return keys.directoryFor(userId, request.auth!.userId, ctxOf(request));
+  });
+
   /** Bundle lookup: consumes one one-time prekey per device of the target user. */
   app.get('/keys/:userId', { preHandler: [app.authenticate], schema: { tags: ['e2ee'] } }, async (request) => {
     const { userId } = request.params as { userId: string };

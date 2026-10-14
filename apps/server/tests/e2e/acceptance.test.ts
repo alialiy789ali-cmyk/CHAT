@@ -1419,4 +1419,82 @@ describe('acceptance criteria', () => {
     // Reusing the same install key landed on the same device row as before.
     expect(recovered.deviceId).toBe(laptop.deviceId);
   });
+
+  it('26. the device directory lists who has keys without claiming any', async () => {
+    const base = e2e().baseUrl;
+    const alice = new ApiClient(base);
+    const bob = new ApiClient(base);
+    const carol = new ApiClient(base);
+    await alice.register({ username: uniqueUsername('dir_alice') });
+    await bob.register({ username: uniqueUsername('dir_bob') });
+    await carol.register({ username: uniqueUsername('dir_carol') });
+
+    // Bob has a real Olm device; his *other* session device never published any keys.
+    const bobDevice = await OlmDevice.create('bob-phone');
+    await bob.request('PUT', '/api/keys/identity/olm', { body: bobDevice.publish(20) });
+
+    const countRemaining = async (): Promise<number> => {
+      const inventory = await bob.request<{ devices: Array<{ deviceId: string; remainingOneTimePreKeys: number }> }>(
+        'GET',
+        '/api/keys/me',
+      );
+      return inventory.body.devices.find((device) => device.deviceId === bob.deviceId)!.remainingOneTimePreKeys;
+    };
+    const before = await countRemaining();
+
+    // The directory answers the question a sender actually has — who exists — and nothing else.
+    const directory = await alice.request<{
+      targetUserId: string;
+      devices: Array<{ deviceId: string; algorithm: string; identityKey: string; signingKey?: string }>;
+    }>('GET', `/api/keys/${bob.userId}/devices`);
+    expect(directory.status).toBe(200);
+    expect(directory.body.targetUserId).toBe(bob.userId);
+    expect(directory.body.devices.map((device) => device.deviceId)).toEqual([bob.deviceId]);
+    expect(directory.body.devices[0]!.algorithm).toBe('olm-v1');
+    expect(directory.body.devices[0]!.identityKey).toBe(bobDevice.identityKeys().curve25519);
+    expect(directory.body.devices[0]!.signingKey).toBe(bobDevice.identityKeys().ed25519);
+    // No key material of any kind: a directory entry is public identity data, not a claim.
+    expect(JSON.stringify(directory.body)).not.toContain('oneTimePreKey');
+    expect(JSON.stringify(directory.body)).not.toContain('Private');
+
+    // …and it is free: refreshing it before every send must not drain the recipient's pool.
+    await alice.request('GET', `/api/keys/${bob.userId}/devices`);
+    await alice.request('GET', `/api/keys/${bob.userId}/devices`);
+    expect(await countRemaining()).toBe(before);
+
+    // Claiming is the separate, destructive step — exactly one key per bundle fetch.
+    const claimed = await alice.request<{ bundles: Array<{ deviceId: string; oneTimePreKey?: { publicKey: string } }> }>(
+      'GET',
+      `/api/keys/${bob.userId}`,
+    );
+    expect(claimed.status).toBe(200);
+    expect(claimed.body.bundles[0]!.oneTimePreKey).toBeTruthy();
+    expect(await countRemaining()).toBe(before - 1);
+
+    // Same access rules as bundles: no directory for someone who cannot message you.
+    const bobUsername = bob.username!;
+    const blocked = await alice.request('POST', `/api/users/${bobUsername}/block`);
+    expect(blocked.status).toBe(200);
+    const afterBlock = await alice.request<{ error: { code: string; message: string } }>(
+      'GET',
+      `/api/keys/${bob.userId}/devices`,
+    );
+    expect(afterBlock.status).toBe(403);
+    // `code` is the HTTP category, `message` carries the reason.
+    expect(afterBlock.body.error.code).toBe('forbidden');
+    expect(afterBlock.body.error.message).toBe('blocked_by_recipient');
+    await alice.request('DELETE', `/api/users/${bobUsername}/block`);
+    // Unblocking restores the directory, so the rule is the block and not a sticky failure.
+    const restored = await alice.request<{ devices: unknown[] }>('GET', `/api/keys/${bob.userId}/devices`);
+    expect(restored.status).toBe(200);
+    expect(restored.body.devices).toHaveLength(1);
+
+    // A user with no published keys gets an empty list, not an error: the sender decides what that
+    // means (and reports it as an unaddressable participant).
+    const keyless = await alice.request<{ devices: unknown[] }>('GET', `/api/keys/${carol.userId}/devices`);
+    expect(keyless.status).toBe(200);
+    expect(keyless.body.devices).toEqual([]);
+    const unknown = await alice.request<{ error: { code: string } }>('GET', '/api/keys/11111111-1111-4111-8111-111111111111/devices');
+    expect(unknown.status).toBe(404);
+  });
 });

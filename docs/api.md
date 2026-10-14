@@ -22,6 +22,8 @@
 | PUT | `/keys/identity/olm` | نشر/تدوير جهاز Olm (الويب): `{deviceId?, identityKey, signingKey, signature, oneTimeKeys[{id,key}]}` → `{deviceId, algorithm: 'olm-v1', identityRotated, oneTimeKeysStored}` |
 | POST | `/keys/prekeys/olm` | تعبئة مفاتيح Olm لمرة واحدة `{deviceId?, oneTimeKeys[]}` → `{oneTimeKeysStored}` |
 | GET | `/keys/me` | جرد لكل جهاز: `{deviceId, algorithm, signingKey, remainingOneTimePreKeys, identityKey, verifiedAt}` |
+| GET | `/keys/:userId/devices` | **دليل الأجهزة**: `{targetUserId, devices:[{deviceId, algorithm, identityKey, signingKey, identitySignature}]}` — بلا أي مفاتيح لمرّة واحدة (لا يستهلك شيئاً)، فمن الآمن استدعاؤه قبل كل إرسال لمعرفة من وُجد حديثاً |
+| GET | `/keys/:userId` | حزم المفاتيح للمصافحة: تستهلك مفتاحاً واحداً لكل جهاز من أجهزة الطرف (`oneTimePreKey`) |
 | GET | `/keys/:userId` | حِزم الأجهزة للطرف الآخر — **يُستهلك مفتاح لمرة واحدة لكل جهاز** عند كل طلب، ويحترم الخصوصية والحظر. حزمة Olm تحمل `signingKey` + `identitySignature` ليتمكن العميل من التحقق الذاتي |
 | POST | `/keys/verify` | `{deviceId, fingerprint, verified}` — تحقق **لك أنت وحدك** من بصمة جهاز الطرف الآخر |
 | GET | `/keys/verify/:userId` | حالة التحقق لكل أجهزة المستخدم كما تراها أنت، مع `identityKey`/`signingKey` العامّين لحساب رقم الأمان محلياً |

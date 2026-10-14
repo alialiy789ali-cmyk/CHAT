@@ -236,20 +236,7 @@ export class KeysService {
     ctx: RequestContext,
   ): Promise<{ targetUserId: string; bundles: KeyBundleForDevice[] }> {
     this.assertEnabled();
-    const target = await this.deps.repos.users.findById(targetUserId);
-    assert(target && target.status === 'active', 'not_found', 'user_not_found');
-
-    if (targetUserId !== callerId) {
-      const blocked = await this.deps.repos.social.blockExistsBetween(targetUserId, callerId);
-      if (blocked) throw new AppError('forbidden', 'blocked_by_recipient');
-      const privacy = target!.privacy_settings as { whoCanMessage?: string } | null;
-      // Respect the recipient's messaging privacy: no bundles for people who cannot message.
-      if (privacy?.whoCanMessage === 'nobody') throw new AppError('forbidden', 'messaging_disabled_by_recipient');
-      if (privacy?.whoCanMessage === 'contacts') {
-        const mutual = await this.deps.repos.social.mutualFollow(targetUserId, callerId);
-        if (!mutual) throw new AppError('forbidden', 'mutual_follow_required');
-      }
-    }
+    await this.assertCanReach(targetUserId, callerId);
 
     const devices = await this.deps.repos.keys.forUser(targetUserId);
     assert(devices.length > 0, 'not_found', 'no_devices_with_keys');
@@ -303,6 +290,54 @@ export class KeysService {
     });
 
     return { targetUserId, bundles };
+  }
+
+  /**
+   * The target user's published devices, without claiming anything.
+   *
+   * Callers need the *current* device list before encrypting (a device that appeared since the last
+   * send must be addressed), and they need it often enough that claiming a one-time key per refresh
+   * would drain the recipient's pool. So this endpoint shares `bundlesFor`'s access rules and none of
+   * its side effects; keys are claimed only when a session is actually built.
+   */
+  async directoryFor(
+    targetUserId: string,
+    callerId: string,
+    _ctx: RequestContext,
+  ): Promise<{ targetUserId: string; devices: Array<Record<string, unknown>> }> {
+    this.assertEnabled();
+    await this.assertCanReach(targetUserId, callerId);
+
+    const devices = await this.deps.repos.keys.forUser(targetUserId);
+    return {
+      targetUserId,
+      devices: devices.map((device) => ({
+        deviceId: device.device_id,
+        algorithm: device.algorithm,
+        identityKey: device.identity_key_public,
+        ...(device.signing_key_public ? { signingKey: device.signing_key_public } : {}),
+        ...(device.identity_signature ? { identitySignature: device.identity_signature } : {}),
+      })),
+    };
+  }
+
+  /**
+   * Access rules shared by every key lookup: the target must exist and be reachable — not blocked,
+   * and not private about who may message them.
+   */
+  private async assertCanReach(targetUserId: string, callerId: string): Promise<void> {
+    const target = await this.deps.repos.users.findById(targetUserId);
+    assert(target && target.status === 'active', 'not_found', 'user_not_found');
+    if (targetUserId === callerId) return;
+
+    const blocked = await this.deps.repos.social.blockExistsBetween(targetUserId, callerId);
+    if (blocked) throw new AppError('forbidden', 'blocked_by_recipient');
+    const privacy = target!.privacy_settings as { whoCanMessage?: string } | null;
+    if (privacy?.whoCanMessage === 'nobody') throw new AppError('forbidden', 'messaging_disabled_by_recipient');
+    if (privacy?.whoCanMessage === 'contacts') {
+      const mutual = await this.deps.repos.social.mutualFollow(targetUserId, callerId);
+      if (!mutual) throw new AppError('forbidden', 'mutual_follow_required');
+    }
   }
 
   /** ---------------------------------------------------------------- verification */

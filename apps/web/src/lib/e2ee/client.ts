@@ -12,7 +12,7 @@
  *   - the safety number is computed from the two identity keys, so each side can derive it without
  *     a round trip and a substituted key is visible (see ./fingerprint).
  */
-import { serializeEnvelope, type E2eeDeviceBundle, type MessageEnvelope } from './types';
+import { serializeEnvelope, type E2eeDeviceBundle, type E2eeDeviceDescriptor, type MessageEnvelope } from './types';
 import {
   deleteSession,
   loadAccount,
@@ -214,7 +214,7 @@ export class OlmDevice {
    * check is cheap and non-optional, so it is part of building a session rather than a caller's
    * responsibility.
    */
-  verifyBundle(bundle: E2eeDeviceBundle): boolean {
+  verifyBundle(bundle: Pick<E2eeDeviceDescriptor, 'identityKey'> & Partial<E2eeDeviceDescriptor>): boolean {
     if (!bundle.signingKey || !bundle.identitySignature) return false;
     // Verified against the shipped build: `ed25519_verify` lives on an *instance* of Olm.Utility
     // (`new Utility().ed25519_verify(...)`), not on the class — the static form is undefined.
@@ -317,6 +317,11 @@ export class OlmDevice {
     await this.persistSession(session, peerDeviceId);
     await this.remember(true);
     return plaintext;
+  }
+
+  /** Cheap existence check: does a ratchet with this peer device already exist locally? */
+  async hasStoredSession(peerDeviceId: string): Promise<boolean> {
+    return (await loadSession(sessionKey(this.deviceId, peerDeviceId))) !== null;
   }
 
   private async restoreSession(peerDeviceId: string): Promise<OlmSession | null> {

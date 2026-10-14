@@ -15,7 +15,7 @@
  */
 
 const DB_NAME = 'sovereign-e2ee';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE_ACCOUNTS = 'accounts';
 const STORE_SESSIONS = 'sessions';
 const STORE_PLAINTEXT = 'plaintext';
@@ -41,13 +41,20 @@ export interface StoredAccount {
 function openDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
-    request.onupgradeneeded = () => {
+    request.onupgradeneeded = (event) => {
       const db = request.result;
       if (!db.objectStoreNames.contains(STORE_ACCOUNTS)) db.createObjectStore(STORE_ACCOUNTS, { keyPath: 'deviceId' });
       if (!db.objectStoreNames.contains(STORE_SESSIONS)) db.createObjectStore(STORE_SESSIONS, { keyPath: 'id' });
-      // Plaintext of messages this device decrypted, so the thread renders instantly instead of
-      // waiting for a network round trip (and keeps working while offline).
-      if (!db.objectStoreNames.contains(STORE_PLAINTEXT)) db.createObjectStore(STORE_PLAINTEXT, { keyPath: 'messageId' });
+      // v1 keyed plaintext by message id alone, which made two devices in one browser profile
+      // overwrite each other's entry: the second write silently erased the first, and the message
+      // came back "locked" later even though the device had already decrypted it. v2 keys by
+      // (deviceId, messageId). Cached plaintext is disposable, so the store is rebuilt.
+      if ((event as IDBVersionChangeEvent).oldVersion < 2 && db.objectStoreNames.contains(STORE_PLAINTEXT)) {
+        db.deleteObjectStore(STORE_PLAINTEXT);
+      }
+      if (!db.objectStoreNames.contains(STORE_PLAINTEXT)) {
+        db.createObjectStore(STORE_PLAINTEXT, { keyPath: ['deviceId', 'messageId'] });
+      }
       if (!db.objectStoreNames.contains(STORE_WRAP_KEY)) db.createObjectStore(STORE_WRAP_KEY);
     };
     request.onsuccess = () => resolve(request.result);
@@ -222,7 +229,9 @@ export async function cachePlaintext(entry: CachedPlaintext): Promise<void> {
  * Returning them for the wrong device would hand one account text it never decrypted.
  */
 export async function loadPlaintext(messageId: string, deviceId: string): Promise<CachedPlaintext | null> {
-  const entry = await transaction<CachedPlaintext | undefined>(STORE_PLAINTEXT, 'readonly', (store) => store.get(messageId));
+  const entry = await transaction<CachedPlaintext | undefined>(STORE_PLAINTEXT, 'readonly', (store) =>
+    store.get([deviceId, messageId]),
+  );
   if (!entry || entry.deviceId !== deviceId) return null;
   return entry;
 }
