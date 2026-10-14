@@ -22,6 +22,15 @@
  * The combination handed to `setWebCrypto` is therefore: native randomness + the library's own
  * primitives (or the platform's when it has them, e.g. Node in tests, a browser).
  */
+/**
+ * First, and before the line below: the Signal-protocol library pulls in an emscripten-built curve25519
+ * whose module scope constructs `new TextDecoder('utf-16le')`, an encoding Expo's UTF-8-only decoder
+ * rejects. The throw happens while the module is being evaluated, so it cannot be caught — the decoder
+ * has to be compatible *before* the import is evaluated, which in ES modules means being imported
+ * first. This was the launch crash of the first published APK (see ../../lib/text-encoding.ts).
+ */
+import '../text-encoding';
+
 import { setWebCrypto } from '@privacyresearch/libsignal-protocol-typescript';
 
 type RandomSource = { getRandomValues<T extends ArrayBufferView>(array: T): T };
