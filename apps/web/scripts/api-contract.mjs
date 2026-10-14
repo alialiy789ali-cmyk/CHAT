@@ -152,7 +152,15 @@ const login = await call('/api/auth/login', {
     device: { name: 'contract runner', platform: 'web', key: 'contract-runner-layla' },
   },
 });
-ok('seed login layla', login.status === 200);
+ok('seed login layla', login.status === 200, login.status === 429 ? 'rate limited' : '');
+if (login.status === 429) {
+  // The global limiter is 300 requests/minute per IP and a full run makes a large fraction of that,
+  // so two runs in the same minute legitimately collide. Say so instead of cascading.
+  console.error(`\nRate limited (retry in ${login.json?.error?.retryAfterSeconds ?? '?'}s): the checks make ~200 ` +
+    'requests, and the dev limiter allows 300 per minute per IP. Wait a minute between runs — or restart the ' +
+    'API, whose limiter keeps its counters in memory.\n');
+  process.exit(1);
+}
 const layla = login.json?.accessToken;
 const laylaMe = await call('/api/users/me', { token: layla });
 ok('seed viewer has stats + locale', laylaMe.status === 200 && laylaMe.json?.locale === 'ar' && typeof laylaMe.json?.stats?.posts === 'number');
