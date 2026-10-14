@@ -118,6 +118,7 @@
 
 **قاعدة الاتّساق بين الملف والرسالة**: لا يُقبل مرفق مشفّر في محادثة عادية (`plaintext_conversation_rejects_encrypted_files`) ولا مرفق مقروء في محادثة مشفّرة (`encrypted_conversation_requires_encrypted_files`) — الحالتان `400 validation_error`.
 | GET | `/files/allowed-types` \| `/files/usage` | الأنواع المسموحة والاستهلاك |
+| GET | `/metrics` | مؤشرات Prometheus (text 0.0.4): عدّادات الطلبات حسب **نمط المسار** والحالة، هيستوجرام زمن الاستجابة، اتصالات WebSocket، وحالة مجمّع قاعدة البيانات. **مُعطَّل ما لم يُضبط `METRICS_TOKEN`** (بدونه 404)؛ معه يلزم `x-metrics-token` أو `?token=` وإلا 401 `metrics_token_required` |
 
 **لماذا يوجد رمز وسائط منفصل؟** المتصفح لا يستطيع إرسال ترويسة `Authorization` مع `<img>` أو
 `<video>` أو رابط تنزيل، ووضع رمز الوصول (15 دقيقة، يصلح لكل الـAPI) في سلسلة استعلام يسرّبه

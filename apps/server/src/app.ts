@@ -13,6 +13,7 @@ import type { ServiceContainer } from './services/container.js';
 import type { AppDeps } from './services/context.js';
 import { describeConfig } from './config/index.js';
 import { AppError } from './lib/errors.js';
+import { metrics } from './lib/metrics.js';
 
 /**
  * HTTP application factory.
@@ -52,6 +53,25 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
   }) as unknown as FastifyInstance;
 
   app.decorate('deps', deps);
+
+  /**
+   * Every response is counted, whatever happens to it.
+   *
+   * `routeOptions.url` is the **pattern** (`/files/:attachmentId`), not the requested path, which is
+   * what keeps the series count bounded: one series per route instead of one per attachment id. The
+   * global 404 handler reports as `unmatched`.
+   */
+  app.addHook('onResponse', async (request, reply) => {
+    const route = request.routeOptions?.url ?? 'unmatched';
+    const labels = { method: request.method, route, status: String(reply.statusCode) };
+    metrics.inc('sovereign_http_requests_total', labels, 'HTTP responses by route pattern and status');
+    metrics.observe(
+      'sovereign_http_request_duration_seconds',
+      reply.elapsedTime / 1000,
+      { method: request.method, route },
+      'HTTP request duration in seconds',
+    );
+  });
 
   await app.register(errorHandlerPlugin);
 

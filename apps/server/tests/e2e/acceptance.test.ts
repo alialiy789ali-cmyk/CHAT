@@ -1693,4 +1693,74 @@ describe('acceptance criteria', () => {
     // A new identity, not the resurrected old one: the keys were really deleted.
     expect(restored.body.devices[0]!.identityKey).not.toBe(oldIdentityKey);
   });
+  it('29. operational metrics exist only when an operator turns them on', async () => {
+    const base = e2e().baseUrl;
+    const token = process.env.METRICS_TOKEN!;
+    expect(token).toBeTruthy();
+
+    // A configured endpoint must not answer to a caller without the token.
+    const anonymous = await fetch(`${base}/api/metrics`);
+    expect(anonymous.status).toBe(401);
+    const wrongToken = await fetch(`${base}/api/metrics`, { headers: { 'x-metrics-token': 'not-the-token' } });
+    expect(wrongToken.status).toBe(401);
+
+    const counterOf = (text: string, method: string, route: string, status: string): number => {
+      const match = text.match(
+        new RegExp(`sovereign_http_requests_total\\{method="${method}",route="${route}",status="${status}"\\} (\\d+)`),
+      );
+      return match ? Number(match[1]) : 0;
+    };
+    const scrape = async (): Promise<string> => {
+      const response = await fetch(`${base}/api/metrics`, { headers: { 'x-metrics-token': token } });
+      expect(response.status).toBe(200);
+      expect(response.headers.get('content-type')).toContain('text/plain');
+      return response.text();
+    };
+
+    const first = await scrape();
+    // The scrape reports the operational picture an operator needs.
+    expect(first).toContain('# TYPE sovereign_http_requests_total counter');
+    expect(first).toContain('sovereign_db_pool_total');
+    expect(first).toContain('sovereign_db_pool_idle');
+    expect(first).toContain('sovereign_realtime_connections');
+    expect(first).toContain('process_resident_memory_bytes');
+
+    // Scraping is itself a request, and it is counted like any other (the first scrape predates its
+    // own series, so the second one shows it).
+    const second_ = await scrape();
+    // Route labels carry the full pattern, prefix included: `/api/metrics`, `/api/files/:attachmentId`.
+    expect(second_).toContain('sovereign_http_requests_total{method="GET",route="/api/metrics",status="200"}');
+    expect(second_).toContain('sovereign_http_request_duration_seconds_bucket{method="GET",route="/api/metrics"');
+
+    // The counters are real: one health probe moves exactly one series by one.
+    const before = counterOf(second_, 'GET', '/api/health', '200');
+    const health = await fetch(`${base}/api/health`);
+    expect(health.status).toBe(200);
+    const second = await scrape();
+    expect(counterOf(second, 'GET', '/api/health', '200')).toBe(before + 1);
+
+    // Cardinality: requesting two different attachment ids must not create two series. The route
+    // pattern (not the URL) is the label, so the series count is a function of method and status —
+    // this is the property that keeps a scrape from growing with every file anyone opens.
+    const seriesCount = (text: string): number => (text.match(/route="\/api\/files\/:attachmentId"/g) ?? []).length;
+    const warmUpId = '33333333-3333-4333-8333-333333333333';
+    await fetch(`${base}/api/files/${warmUpId}`);
+    const baseline = seriesCount(await scrape());
+    const firstId = '11111111-1111-4111-8111-111111111111';
+    const secondId = '22222222-2222-4222-8222-222222222222';
+    await fetch(`${base}/api/files/${firstId}`);
+    await fetch(`${base}/api/files/${secondId}`);
+    const third = await scrape();
+    expect(baseline).toBeGreaterThan(0);
+    expect(seriesCount(third)).toBe(baseline);
+    expect(third).not.toContain(firstId);
+    expect(third).not.toContain(secondId);
+
+    // And nothing about who talks to whom: the scrape carries no account, conversation or message ids.
+    const alice = new ApiClient(base);
+    await alice.register({ username: uniqueUsername('metrics') });
+    const fourth = await scrape();
+    expect(fourth).not.toContain(alice.userId);
+    expect(fourth).not.toContain(alice.username!);
+  });
 });

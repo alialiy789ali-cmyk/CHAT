@@ -110,6 +110,16 @@ const envSchema = z.object({
   RATE_LIMIT_GLOBAL_WINDOW: z.string().default('1 minute'),
   UPLOAD_MAX_BYTES: z.coerce.number().int().default(50 * 1024 * 1024),
 
+  /**
+   * Token for `GET /api/metrics`.
+   *
+   * Optional on purpose: without it the endpoint reports 404, so a deployment that never configured
+   * monitoring exposes nothing at all. When set, a scraper must send it as `x-metrics-token` (or
+   * `?token=`). Minimum length matches the other secrets so a guessable value cannot be configured
+   * by accident.
+   */
+  METRICS_TOKEN: z.string().min(24).optional(),
+
   // ---------------------------------------------------------------- E2EE
   /**
    * End-to-end encryption is on by default: both ratchets (Signal for mobile, Matrix Olm for the

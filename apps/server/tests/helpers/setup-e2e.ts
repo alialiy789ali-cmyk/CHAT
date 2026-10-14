@@ -42,6 +42,8 @@ beforeAll(async () => {
   // Acceptance 22 exercises the real E2EE path (keys published by clients, ciphertext relayed
   // untouched). With the flag off the server correctly *rejects* ciphertext — also asserted.
   process.env.E2EE_ENABLED = 'true';
+  // Monitoring is off unless a token is configured; the suite runs with one so both paths are covered.
+  process.env.METRICS_TOKEN = 'test-metrics-token-32-characters-min';
 
   // Hermetic database: a dedicated data directory that is wiped before and after the
   // run, so a leftover postmaster from an earlier test run can never be reused.

@@ -117,6 +117,35 @@ cd /opt/sovereign && git pull && docker compose -f infra/docker-compose.yml up -
 بشرط `CACHE_DRIVER=redis` (مُعدّ افتراضياً في Compose) وموازن يحتفظ بالاتصال (nginx `ip_hash`
 أو sticky للـ`/ws`).
 
+### مؤشرات Prometheus
+
+`GET /api/metrics` يصدر الصيغة النصية المعروفة (Prometheus text 0.0.4) — **لكنه مُعطَّل افتراضياً**:
+بدون `METRICS_TOKEN` يعيد 404، فلا تكشف نشرة لم تُضبط أي شيء. عند ضبط الرمز يلزم تمريره في
+`x-metrics-token` (أو `?token=`)، والمقارنة ثابتة الزمن.
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: sovereign
+    scrape_interval: 15s
+    metrics_path: /api/metrics
+    static_configs:
+      - targets: ['127.0.0.1:8787']
+    authorization:
+      credentials_file: /etc/prometheus/sovereign-metrics-token
+```
+
+ما يُقاس: `sovereign_http_requests_total{method,route,status}` بمعدل الطلبات والأخطاء حسب **نمط
+المسار** (مثل `/api/files/:attachmentId`) لا حسب الرابط الكامل، و`sovereign_http_request_duration_seconds`
+(هيستوجرام buckets زمن الاستجابة)، و`sovereign_realtime_connections` (اتصالات WebSocket الحيّة)،
+و`sovereign_db_pool_{total,idle,waiting}`، وذاكرة/عمر العملية. لا يحمل أي مؤشر معرّفات مستخدمين أو
+محادثات — تكبير الكارديناليتي وتسريب البيانات الوصفية مرفوضان بالتصميم.
+
+تنبيهات مقترحة: `rate(sovereign_http_requests_total{status=~"5.."}[5m]) > 0.1`،
+`histogram_quantile(0.95, rate(sovereign_http_request_duration_seconds_bucket[5m])) > 1`،
+`sovereign_db_pool_waiting > 0` لمدة دقيقتين، و`sovereign_realtime_connections` عند الصفر في ساعات
+الذروة (مؤشر انقطاع وسيط).
+
 ## 7) تقوية (Hardening) موصى بها
 
 - SSH بمفاتيح فقط، وتعطيل دخول root: `PermitRootLogin no`.

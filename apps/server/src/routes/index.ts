@@ -10,6 +10,7 @@ import { registerChannelRoutes } from './channels.routes.js';
 import { registerCallRoutes } from './calls.routes.js';
 import { registerKeyRoutes } from './keys.routes.js';
 import { registerModerationRoutes } from './moderation.routes.js';
+import { registerMetricsRoutes } from './metrics.routes.js';
 
 /** Every route is registered under /api and tagged for the generated documentation. */
 export async function registerRoutes(app: FastifyInstance, container: ServiceContainer): Promise<void> {
@@ -25,6 +26,7 @@ export async function registerRoutes(app: FastifyInstance, container: ServiceCon
       await registerCallRoutes(api, container);
       await registerKeyRoutes(api, container);
       await registerModerationRoutes(api, container);
+      await registerMetricsRoutes(api, container);
     },
     { prefix: '/api' },
   );
