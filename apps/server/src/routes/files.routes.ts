@@ -28,11 +28,23 @@ export async function registerFileRoutes(app: FastifyInstance, container: Servic
       reply.status(400).send({ error: { code: 'validation_error', message: 'file_part_required' } });
       return;
     }
-    const durationHeader = file.fields?.durationMs;
-    const durationMs =
-      durationHeader && typeof durationHeader === 'object' && 'value' in durationHeader
-        ? Number((durationHeader as { value: unknown }).value)
-        : null;
+    const fieldValue = (name: string): string | null => {
+      const field = file.fields?.[name];
+      return field && typeof field === 'object' && 'value' in field ? String((field as { value: unknown }).value) : null;
+    };
+
+    const duration = Number(fieldValue('durationMs'));
+    /**
+     * `encrypted` tells the server that these bytes are client-side ciphertext.
+     *
+     * It has to be explicit: ciphertext has no signature, so the content sniffing that protects every
+     * other upload cannot run, and the declared file name/type are deliberately not trusted or even
+     * kept — the real ones live inside the encrypted message payload. A client that sets this flag and
+     * uploads readable content simply loses the ability to have that content rendered.
+     */
+    const encrypted = ['1', 'true', 'yes'].includes(
+      (fieldValue('encrypted') ?? new URL(request.url, 'http://localhost').searchParams.get('encrypted') ?? '').toLowerCase(),
+    );
 
     const attachment = await uploads.upload(
       request.auth!.userId,
@@ -40,7 +52,8 @@ export async function registerFileRoutes(app: FastifyInstance, container: Servic
         fileName: file.filename,
         mimeType: file.mimetype,
         data: file.file,
-        durationMs: Number.isFinite(durationMs as number) ? (durationMs as number) : null,
+        durationMs: Number.isFinite(duration) ? duration : null,
+        encrypted,
       },
       ctxOf(request),
     );

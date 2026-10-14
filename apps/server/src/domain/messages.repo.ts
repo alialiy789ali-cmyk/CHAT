@@ -43,6 +43,8 @@ export interface AttachmentRow {
   height: number | null;
   duration_ms: number | null;
   scan_status: 'pending' | 'clean' | 'infected' | 'skipped';
+  /** Ciphertext uploaded for an encrypted conversation: no sniffing, only the reader can use it. */
+  is_encrypted: boolean;
   created_at: Date;
   deleted_at: Date | null;
 }

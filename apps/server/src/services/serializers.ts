@@ -36,6 +36,7 @@ export function attachmentToDto(row: AttachmentRow): Attachment {
     sizeBytes: Number(row.size_bytes),
     // Files are always served through the authenticated API (never a public bucket URL).
     url: `/api/files/${row.id}`,
+    isEncrypted: row.is_encrypted,
     width: row.width,
     height: row.height,
     durationMs: row.duration_ms,

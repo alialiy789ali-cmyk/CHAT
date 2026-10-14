@@ -66,6 +66,14 @@ export interface Attachment {
   mimeType: string;
   sizeBytes: number;
   url: string;
+  /**
+   * True when the stored bytes are ciphertext belonging to an encrypted conversation.
+   *
+   * The server cannot read such a file, cannot describe it beyond its size, and the real name and
+   * type live inside the encrypted message payload — so a client that cannot decrypt the message
+   * shows "encrypted attachment", not a broken image.
+   */
+  isEncrypted: boolean;
   width: number | null;
   height: number | null;
   durationMs: number | null;

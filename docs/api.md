@@ -111,9 +111,11 @@
 
 | الطريقة | المسار | الوصف |
 | --- | --- | --- |
-| POST | `/files` | multipart (`file`, وحقل `durationMs` اختياري للرسائل الصوتية) → `{attachment}` |
+| POST | `/files` | multipart (`file`, وحقل `durationMs` اختياري للرسائل الصوتية، وحقل `encrypted=true` للمرفقات المشفّرة طرفياً) → `{attachment}`. الخادم يفحص بايتات الملف ويقارنها بالنوع المُعلن: أي اختلاف ⇒ `415 content_type_mismatch`، ونوع غير مسموح ⇒ `415 mime_type_not_allowed`. مع `encrypted=true` يُخزَّن الاسم محايداً (`encrypted.bin`) والنوع `application/octet-stream` — الاسم والنوع الحقيقيان يبقيان داخل الحمولة المشفّرة |
 | GET | `/files/:attachmentId` | ثلاثة أشكال للمصادقة (كلها تخضع لنفس فحص العضوية والجلسة): `Authorization: Bearer <access>`, أو `?token=<media token>`, أو `?access_token=<access>` على GET فقط. ترويسات `nosniff` و`CSP: sandbox` + `private, max-age=3600` |
 | DELETE | `/files/:attachmentId` | حذف (المالك) — يتطلب ترويسة `Authorization` (لا رموز وسائط) |
+
+**قاعدة الاتّساق بين الملف والرسالة**: لا يُقبل مرفق مشفّر في محادثة عادية (`plaintext_conversation_rejects_encrypted_files`) ولا مرفق مقروء في محادثة مشفّرة (`encrypted_conversation_requires_encrypted_files`) — الحالتان `400 validation_error`.
 | GET | `/files/allowed-types` \| `/files/usage` | الأنواع المسموحة والاستهلاك |
 
 **لماذا يوجد رمز وسائط منفصل؟** المتصفح لا يستطيع إرسال ترويسة `Authorization` مع `<img>` أو

@@ -3,6 +3,7 @@ import type { Readable } from 'node:stream';
 import { AppError, assert } from '../lib/errors.js';
 import { contentKey } from '../lib/storage.js';
 import { extensionOf as ext, safeFileName } from '../lib/crypto.js';
+import { detectMediaType, isTypeConsistent } from '../lib/media-type.js';
 import type { AppDeps, RequestContext } from './context.js';
 import { attachmentToDto } from './serializers.js';
 
@@ -10,7 +11,10 @@ import { attachmentToDto } from './serializers.js';
  * File uploads.
  *
  * Controls applied here (defence in depth for requirement 6):
- *  - strict MIME allow-list and per-user/global size limits,
+ *  - strict MIME allow-list, plus a magic-byte check that the bytes really are what was declared
+ *    (a declared type is attacker-controlled; see `lib/media-type.ts`),
+ *  - end-to-end encrypted uploads are the one exception: they are stored as opaque ciphertext and
+ *    explicitly flagged, because ciphertext has no signature to check,
  *  - the client-provided filename is sanitised; the storage key is derived from the
  *    content hash, never from user input (path traversal is impossible),
  *  - downloads always go through an authorisation check, never a public bucket URL,
@@ -63,36 +67,67 @@ export class UploadsService {
 
   async upload(
     userId: string,
-    input: { fileName: string; mimeType: string; data: Readable | Buffer; sizeBytes?: number; durationMs?: number | null },
+    input: {
+      fileName: string;
+      mimeType: string;
+      data: Readable | Buffer;
+      sizeBytes?: number;
+      durationMs?: number | null;
+      /** The bytes are client-side ciphertext for an encrypted conversation (never sniffed). */
+      encrypted?: boolean;
+    },
     ctx: RequestContext,
   ) {
     const cfg = this.deps.cfg;
-    assert(this.isAllowed(input.mimeType), 'unsupported_media_type', `mime_type_not_allowed:${input.mimeType}`);
+    const encrypted = input.encrypted === true;
+
+    if (!encrypted) {
+      assert(this.isAllowed(input.mimeType), 'unsupported_media_type', `mime_type_not_allowed:${input.mimeType}`);
+    }
 
     const data = Buffer.isBuffer(input.data) ? input.data : await streamToBuffer(input.data, cfg.UPLOAD_MAX_BYTES);
     assert(data.byteLength <= cfg.UPLOAD_MAX_BYTES, 'payload_too_large', 'file_exceeds_limit');
     assert(data.byteLength > 0, 'validation_error', 'empty_file');
 
-    const fileName = safeFileName(input.fileName);
+    /**
+     * Two shapes of file, two sets of rules.
+     *
+     * Encrypted uploads: the declared type is irrelevant (the server stores binary), the *name* is
+     * replaced by a neutral one so the server never learns "medical-report.pdf" — the real name and
+     * type travel inside the encrypted message payload — and no scanner is asked to interpret bytes
+     * it cannot read.
+     *
+     * Everything else: the bytes must agree with the declared type. A JPEG announced as `text/plain`,
+     * or a text file announced as `image/png`, is refused before it is stored; the readers downstream
+     * (browsers, media elements) trust that type.
+     */
+    const detected = encrypted ? null : detectMediaType(data);
+    assert(encrypted || isTypeConsistent(input.mimeType, detected), 'unsupported_media_type', 'content_type_mismatch');
+
+    const fileName = encrypted ? 'encrypted.bin' : safeFileName(input.fileName);
+    const mimeType = encrypted ? 'application/octet-stream' : input.mimeType;
     const sha256 = createHash('sha256').update(data).digest('hex');
-    const key = contentKey(sha256, ext(fileName) || mimeExtension(input.mimeType));
+    const key = contentKey(sha256, ext(fileName) || mimeExtension(mimeType));
 
     // Deduplicate: the same bytes uploaded by the same user reuse the metadata row.
-    const existing = await this.deps.repos.files.findBySha(sha256, userId);
+    const existing = await this.deps.repos.files.findBySha(sha256, userId, encrypted);
     if (existing) return attachmentToDto(existing);
 
-    const stored = await this.deps.storage.put(key, data, input.mimeType);
+    const stored = await this.deps.storage.put(key, data, mimeType);
     assert(stored.sha256 === sha256, 'storage_error', 'checksum_mismatch');
 
     const row = await this.deps.repos.files.create({
       uploaderId: userId,
       storageKey: stored.key,
       fileName,
-      mimeType: input.mimeType,
+      mimeType,
       sizeBytes: stored.sizeBytes,
       sha256,
-      durationMs: input.durationMs ?? null,
-      scanStatus: 'pending',
+      durationMs: encrypted ? null : (input.durationMs ?? null),
+      // A scanner cannot say anything about ciphertext, and pretending otherwise would be a lie in
+      // the review queue: such files are marked as deliberately skipped.
+      scanStatus: encrypted ? 'skipped' : 'pending',
+      isEncrypted: encrypted,
     });
 
     await this.deps.repos.audit.record({
@@ -101,11 +136,11 @@ export class UploadsService {
       action: 'file.uploaded',
       targetType: 'attachment',
       targetId: row.id,
-      metadata: { mimeType: input.mimeType, sizeBytes: stored.sizeBytes },
+      metadata: { mimeType, sizeBytes: stored.sizeBytes, encrypted },
     });
 
     this.deps.logger.info(
-      { userId, attachmentId: row.id, mimeType: input.mimeType, sizeBytes: stored.sizeBytes },
+      { userId, attachmentId: row.id, mimeType, sizeBytes: stored.sizeBytes, encrypted },
       'file uploaded',
     );
     return attachmentToDto(row);

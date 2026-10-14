@@ -451,6 +451,22 @@ export class MessagingService {
     }
 
     if (attachmentIds.length > 0 && !duplicated) {
+      /**
+       * A file and its message must agree about encryption.
+       *
+       * A readable file inside an encrypted conversation would leak precisely what that conversation
+       * exists to protect, so only ciphertext uploads may be attached there. The reverse is refused
+       * too: ciphertext in a plaintext conversation is a file nobody but the sender can open, which
+       * is a broken send rather than a protected one.
+       */
+      const files = await this.deps.repos.files.listOwnedByIds(attachmentIds, input.senderId);
+      assert(files.length === attachmentIds.length, 'validation_error', 'some_attachments_unavailable');
+      const mismatched = files.filter((file) => file.is_encrypted !== conversation.is_encrypted);
+      assert(
+        mismatched.length === 0,
+        'validation_error',
+        conversation.is_encrypted ? 'encrypted_conversation_requires_encrypted_files' : 'plaintext_conversation_rejects_encrypted_files',
+      );
       const attached = await this.messages.attachMessageToAttachments(message.id, attachmentIds, input.senderId);
       assert(attached === attachmentIds.length, 'validation_error', 'some_attachments_unavailable');
     }

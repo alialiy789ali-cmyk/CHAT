@@ -12,7 +12,7 @@ export interface AttachmentWithContext extends AttachmentRow {
 const ATTACHMENT_COLUMNS = `
   a.id, a.uploader_id, a.message_id, a.post_id, a.channel_post_id, a.storage_key, a.file_name,
   a.mime_type, a.size_bytes, a.sha256, a.width, a.height, a.duration_ms, a.scan_status,
-  a.created_at, a.deleted_at
+  a.is_encrypted, a.created_at, a.deleted_at
 `;
 
 export class FilesRepo {
@@ -29,10 +29,11 @@ export class FilesRepo {
     height?: number | null;
     durationMs?: number | null;
     scanStatus?: 'pending' | 'clean' | 'skipped';
+    isEncrypted?: boolean;
   }): Promise<AttachmentRow> {
     return this.db.oneOrFail<AttachmentRow>(
-      `insert into attachments (uploader_id, storage_key, file_name, mime_type, size_bytes, sha256, width, height, duration_ms, scan_status)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      `insert into attachments (uploader_id, storage_key, file_name, mime_type, size_bytes, sha256, width, height, duration_ms, scan_status, is_encrypted)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        returning *`,
       [
         input.uploaderId,
@@ -45,6 +46,7 @@ export class FilesRepo {
         input.height ?? null,
         input.durationMs ?? null,
         input.scanStatus ?? 'pending',
+        input.isEncrypted ?? false,
       ],
       'storage_error',
     );
@@ -114,10 +116,28 @@ export class FilesRepo {
     return Boolean(row?.allowed);
   }
 
-  findBySha(sha256: string, uploaderId: string): Promise<AttachmentRow | null> {
+  /**
+   * Deduplication lookup.
+   *
+   * `is_encrypted` is part of the match: the same bytes cannot legitimately be both a readable file
+   * and ciphertext, so a row found under the other mode is a different thing and must not be reused
+   * (its stored name, type and scan status answer a different question).
+   */
+  findBySha(sha256: string, uploaderId: string, isEncrypted = false): Promise<AttachmentRow | null> {
     return this.db.one<AttachmentRow>(
-      `select ${ATTACHMENT_COLUMNS} from attachments a where a.sha256 = $1 and a.uploader_id = $2 and a.deleted_at is null limit 1`,
-      [sha256, uploaderId],
+      `select ${ATTACHMENT_COLUMNS} from attachments a
+        where a.sha256 = $1 and a.uploader_id = $2 and a.is_encrypted = $3 and a.deleted_at is null limit 1`,
+      [sha256, uploaderId, isEncrypted],
+    );
+  }
+
+  /** Attachments owned by `uploaderId` with the given ids (used to validate a send). */
+  async listOwnedByIds(ids: string[], uploaderId: string): Promise<AttachmentRow[]> {
+    if (ids.length === 0) return [];
+    return this.db.many<AttachmentRow>(
+      `select ${ATTACHMENT_COLUMNS} from attachments a
+        where a.uploader_id = $1 and a.deleted_at is null and a.id = any($2::uuid[])`,
+      [uploaderId, ids],
     );
   }
 

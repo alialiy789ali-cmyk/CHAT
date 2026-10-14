@@ -1497,4 +1497,141 @@ describe('acceptance criteria', () => {
     const unknown = await alice.request<{ error: { code: string } }>('GET', '/api/keys/11111111-1111-4111-8111-111111111111/devices');
     expect(unknown.status).toBe(404);
   });
+  it('27. uploads are verified against their bytes and encrypted files stay opaque', async () => {
+    const base = e2e().baseUrl;
+    const alice = new ApiClient(base);
+    const bob = new ApiClient(base);
+    await alice.register({ username: uniqueUsername('alice') });
+    await bob.register({ username: uniqueUsername('bob') });
+
+    const png = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==',
+      'base64',
+    );
+
+    // A file whose bytes disagree with its declared type is refused, whichever way it lies.
+    const lyingImage = new FormData();
+    lyingImage.append('file', new Blob([new Uint8Array(Buffer.from('<svg onload=alert(1)></svg>'))], { type: 'image/png' }), 'photo.png');
+    const lyingImageUpload = await alice.request<{ error: { message: string } }>('POST', '/api/files', {
+      body: lyingImage,
+      raw: true,
+    });
+    expect(lyingImageUpload.status).toBe(415);
+    expect(lyingImageUpload.body.error.message).toBe('content_type_mismatch');
+
+    const lyingText = new FormData();
+    lyingText.append('file', new Blob([new Uint8Array(png)], { type: 'text/plain' }), 'notes.txt');
+    const lyingTextUpload = await alice.request<{ error: { message: string } }>('POST', '/api/files', {
+      body: lyingText,
+      raw: true,
+    });
+    expect(lyingTextUpload.status).toBe(415);
+    expect(lyingTextUpload.body.error.message).toBe('content_type_mismatch');
+
+    // An honest upload is accepted and served with its real type.
+    const honest = new FormData();
+    honest.append('file', new Blob([new Uint8Array(png)], { type: 'image/png' }), 'photo.png');
+    const honestUpload = await alice.request<{ attachment: { id: string; isEncrypted: boolean; mimeType: string } }>(
+      'POST',
+      '/api/files',
+      { body: honest, raw: true },
+    );
+    expect(honestUpload.status).toBe(201);
+    expect(honestUpload.body.attachment.isEncrypted).toBe(false);
+
+    // Ciphertext may not be sniffed, so it must be declared: the server keeps no name or type for it.
+    const secretBytes = Buffer.alloc(512);
+    for (let index = 0; index < secretBytes.length; index += 1) secretBytes[index] = (index * 37 + 11) % 256;
+    const cipherForm = new FormData();
+    cipherForm.append('encrypted', 'true');
+    cipherForm.append('file', new Blob([new Uint8Array(secretBytes)], { type: 'application/octet-stream' }), 'secret-voice.ogg');
+    const cipherUpload = await alice.request<{
+      attachment: { id: string; isEncrypted: boolean; mimeType: string; fileName: string; sizeBytes: number };
+    }>('POST', '/api/files', { body: cipherForm, raw: true });
+    expect(cipherUpload.status).toBe(201);
+    expect(cipherUpload.body.attachment.isEncrypted).toBe(true);
+    // The real name and type live inside the encrypted payload, not in the database.
+    expect(cipherUpload.body.attachment.mimeType).toBe('application/octet-stream');
+    expect(cipherUpload.body.attachment.fileName).toBe('encrypted.bin');
+    expect(cipherUpload.body.attachment.sizeBytes).toBe(secretBytes.length);
+    // The readable upload of the same size is a different attachment: the mode is part of the identity.
+    expect(cipherUpload.body.attachment.id).not.toBe(honestUpload.body.attachment.id);
+
+    // The same encrypted bytes are not mistaken for the readable upload (dedup keys on the mode).
+    const repeatCipher = new FormData();
+    repeatCipher.append('encrypted', 'true');
+    repeatCipher.append('file', new Blob([new Uint8Array(secretBytes)], { type: 'application/octet-stream' }), 'secret-voice.ogg');
+    const repeatUpload = await alice.request<{ attachment: { id: string } }>('POST', '/api/files', {
+      body: repeatCipher,
+      raw: true,
+    });
+    expect(repeatUpload.status).toBe(201);
+    expect(repeatUpload.body.attachment.id).toBe(cipherUpload.body.attachment.id);
+
+    const cipherId = cipherUpload.body.attachment.id as string;
+    const honestId = honestUpload.body.attachment.id as string;
+
+    // A plaintext conversation refuses ciphertext: the recipient could not open it.
+    const plain = await alice.request<{ conversation: { id: string } }>('POST', '/api/conversations/direct', {
+      body: { userId: bob.userId },
+    });
+    const wrongSend = await alice.request<{ error: { message: string } }>(
+      'POST',
+      `/api/conversations/${plain.body.conversation.id}/messages`,
+      { body: { clientMessageId: `cipher-mismatch-${Date.now()}`, body: 'ملف', attachmentIds: [cipherId] } },
+    );
+    expect(wrongSend.status).toBe(400);
+    expect(wrongSend.body.error.message).toBe('plaintext_conversation_rejects_encrypted_files');
+
+    // And an encrypted conversation refuses readable files: that would leak exactly what it protects.
+    const aliceDevice = new SignalDevice(alice.username!, 1);
+    const bobDevice = new SignalDevice(bob.username!, 1);
+    await alice.request('PUT', '/api/keys/identity', { body: await aliceDevice.bundleBody() });
+    await bob.request('PUT', '/api/keys/identity', { body: await bobDevice.bundleBody() });
+    const encrypted = await alice.request<{ conversation: { id: string } }>('POST', '/api/conversations/direct', {
+      body: { userId: bob.userId },
+    });
+    const encryptedId = encrypted.body.conversation.id;
+    const enabled = await alice.request<{ isEncrypted: boolean }>('POST', `/api/conversations/${encryptedId}/encryption`, { body: { enabled: true } });
+    expect(enabled.status, JSON.stringify(enabled.body)).toBe(200);
+    expect(enabled.body.isEncrypted).toBe(true);
+
+    const leakySend = await alice.request<{ error: { message: string } }>(
+      'POST',
+      `/api/conversations/${encryptedId}/messages`,
+      {
+        body: {
+          clientMessageId: `plain-file-${Date.now()}`,
+          ciphertext: 'H4sIAAAAAAAA/6tWykvMTVWyUjA0MFDSUcpJTS3KBwAAAP//AwBQ',
+          encryptionScheme: 'libsignal-v1',
+          attachmentIds: [honestId],
+        },
+      },
+    );
+    expect(leakySend.status, JSON.stringify(leakySend.body)).toBe(400);
+    expect(leakySend.body.error.message).toBe('encrypted_conversation_requires_encrypted_files');
+
+    // Ciphertext in the encrypted conversation is accepted and delivered as opaque bytes.
+    const cipherSend = await alice.request<{ message: { attachments: Array<{ id: string; isEncrypted: boolean; url: string }> } }>(
+      'POST',
+      `/api/conversations/${encryptedId}/messages`,
+      {
+        body: {
+          clientMessageId: `cipher-ok-${Date.now()}`,
+          ciphertext: 'H4sIAAAAAAAA/6tWykvMTVWyUjA0MFDSUcpJTS3KBwAAAP//AwBQ',
+          encryptionScheme: 'libsignal-v1',
+          attachmentIds: [cipherId],
+        },
+      },
+    );
+    expect(cipherSend.status, JSON.stringify(cipherSend.body)).toBe(201);
+    expect(cipherSend.body.message.attachments[0]!.isEncrypted).toBe(true);
+
+    const bobDownload = await bob.download(`/api/files/${cipherId}`);
+    expect(bobDownload.status).toBe(200);
+    expect(bobDownload.headers.get('content-type')).toBe('application/octet-stream');
+    expect(bobDownload.headers.get('x-content-type-options')).toBe('nosniff');
+    // The bytes come back exactly as they were uploaded — the server never re-encodes them.
+    expect(bobDownload.bytes.equals(secretBytes)).toBe(true);
+  });
 });
