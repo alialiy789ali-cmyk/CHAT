@@ -1,4 +1,4 @@
-import Fastify, { type FastifyInstance } from 'fastify';
+import Fastify, { LogController, type FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import cookie from '@fastify/cookie';
@@ -42,7 +42,12 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
     loggerInstance: deps.logger,
     trustProxy: true,
     bodyLimit: Math.max(cfg.UPLOAD_MAX_BYTES + 1024, 2 * 1024 * 1024),
-    disableRequestLogging: cfg.profile === 'production',
+    /**
+     * Request logging is off in production (one line per request is noise at volume, and the
+     * structured access log is written by the reverse proxy). Fastify 5.12 moved this switch into a
+     * controller object; the top-level option is removed in v6.
+     */
+    logController: new LogController({ disableRequestLogging: cfg.profile === 'production' }),
     genReqId: () => `req_${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`,
   }) as unknown as FastifyInstance;
 
