@@ -9,8 +9,8 @@
  */
 import { Platform } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
+import { currentApiUrl, usingOverride as overrideActive } from './server-address';
 
-const API_URL = (process.env.EXPO_PUBLIC_API_URL ?? 'http://10.0.2.2:8787').replace(/\/$/, '');
 const REFRESH_KEY = 'sovereign.refreshToken';
 const INSTALL_KEY = 'sovereign.installKey';
 
@@ -76,14 +76,19 @@ class ApiClient {
   private refreshing: Promise<boolean> | null = null;
   private unauthorizedListeners = new Set<Listener>();
 
+  /**
+   * The address in force. Read at call time from `server-address.ts`, never captured in a module
+   * constant: the user can point this install at another server (see the login screen) without
+   * restarting the app.
+   */
   get baseUrl(): string {
-    return API_URL;
+    return currentApiUrl();
   }
 
   get wsBaseUrl(): string {
     const configured = process.env.EXPO_PUBLIC_WS_URL;
-    if (configured) return configured.replace(/\/$/, '');
-    return API_URL.replace(/^http/, 'ws');
+    if (configured && !overrideActive()) return configured.replace(/\/$/, '');
+    return currentApiUrl().replace(/^http/, 'ws');
   }
 
   onUnauthorized(listener: Listener): () => void {
@@ -114,7 +119,7 @@ class ApiClient {
     this.refreshing = (async () => {
       try {
         if (!this.refreshToken) return false;
-        const res = await fetch(`${API_URL}/api/auth/refresh`, {
+        const res = await fetch(`${this.baseUrl}/api/auth/refresh`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ refreshToken: this.refreshToken }),
@@ -145,7 +150,7 @@ class ApiClient {
 
     let res: Response;
     try {
-      res = await fetch(`${API_URL}${path}`, { ...init, headers });
+      res = await fetch(`${this.baseUrl}${path}`, { ...init, headers });
     } catch (err) {
       throw new ApiError(0, 'network_unreachable', 'لا يمكن الوصول إلى الخادم. تحقق من الشبكة أو عنوان الخادم.', String(err));
     }
@@ -201,7 +206,7 @@ class ApiClient {
    */
   absoluteUrl(path: string): string {
     if (/^https?:\/\//.test(path)) return path;
-    return `${API_URL}${path.startsWith('/') ? '' : '/'}${path}`;
+    return `${this.baseUrl}${path.startsWith('/') ? '' : '/'}${path}`;
   }
 
   /**

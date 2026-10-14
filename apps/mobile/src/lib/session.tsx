@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { api, ApiError, devicePayload } from './api';
 import { realtime, type ConnectionState } from './realtime';
+import { currentApiUrl, loadSavedServerUrl } from './server-address';
 
 /** Authentication + viewer state for the whole app (same shapes as the web client). */
 
@@ -39,6 +40,10 @@ interface SessionValue {
    * needs to know which row is its own before it can encrypt. Null until the session is known.
    */
   deviceId: string | null;
+  /** The API origin this install is talking to (build default or the user's saved override). */
+  serverUrl: string;
+  /** Re-reads the address after the user changed it (see `server-address.ts`). */
+  refreshServerUrl: () => void;
   login: (identifier: string, password: string, totp?: string) => Promise<void>;
   register: (input: { username: string; email: string; password: string; displayName?: string }) => Promise<void>;
   logout: () => Promise<void>;
@@ -52,6 +57,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<SessionValue['status']>('loading');
   const [connection, setConnection] = useState<ConnectionState>('closed');
   const [deviceId, setDeviceId] = useState<string | null>(null);
+  const [serverUrl, setServerUrl] = useState<string>(() => currentApiUrl());
 
   const refreshViewer = useCallback(async () => {
     const me = await api.get<Viewer>('/api/users/me');
@@ -62,6 +68,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      // The saved server address comes first: restoring a session means calling that server, and a
+      // stored refresh token is meaningless against the wrong one.
+      const address = await loadSavedServerUrl();
+      if (__DEV__) console.log(`[sovereign] server: ${address}`);
       const restored = await api.restoreSession();
       if (cancelled) return;
       if (!restored) {
@@ -141,9 +151,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setStatus('anonymous');
   }, []);
 
+  const refreshServerUrl = useCallback(() => setServerUrl(currentApiUrl()), []);
+
   const value = useMemo(
-    () => ({ viewer, status, connection, deviceId, login, register, logout, refreshViewer }),
-    [viewer, status, connection, deviceId, login, register, logout, refreshViewer],
+    () => ({ viewer, status, connection, deviceId, serverUrl, refreshServerUrl, login, register, logout, refreshViewer }),
+    [viewer, status, connection, deviceId, serverUrl, refreshServerUrl, login, register, logout, refreshViewer],
   );
 
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;

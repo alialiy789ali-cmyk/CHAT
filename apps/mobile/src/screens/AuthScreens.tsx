@@ -1,8 +1,115 @@
 import { useState } from 'react';
-import { ScrollView, Text } from 'react-native';
+import { ScrollView, Text, View } from 'react-native';
 import { Button, Card, Field, Screen } from '../components/ui';
 import { describeAuthError, useSession } from '../lib/session';
 import { useTheme, typography } from '../lib/theme';
+import {
+  DEFAULT_API_URL,
+  clearServerUrl,
+  normaliseServerUrl,
+  probeServer,
+  saveServerUrl,
+  usingOverride,
+} from '../lib/server-address';
+
+/**
+ * Which server this install talks to.
+ *
+ * The APK ships with one compiled address, but the server is self-hosted: it moves (LAN IP today, a
+ * domain with TLS later) and the same APK has to survive that. This section is where the user
+ * changes it, with the address *tested before it is saved* — saving an unreachable URL would look
+ * successful and then fail at every later step with a message about the network.
+ *
+ * It stays collapsed until it is needed: for a correctly configured build the address is invisible,
+ * which is the point.
+ */
+function ServerSection() {
+  const theme = useTheme();
+  const { serverUrl, refreshServerUrl } = useSession();
+  const [expanded, setExpanded] = useState(false);
+  const [draft, setDraft] = useState(serverUrl);
+  const [note, setNote] = useState<string | null>(null);
+  const [noteTone, setNoteTone] = useState<'info' | 'ok' | 'error'>('info');
+  const [busy, setBusy] = useState(false);
+
+  async function testAndSave() {
+    setBusy(true);
+    setNote(null);
+    try {
+      const normalised = normaliseServerUrl(draft);
+      if (!normalised.ok) {
+        setNoteTone('error');
+        setNote(normalised.error ?? 'عنوان غير صالح.');
+        return;
+      }
+      const probe = await probeServer(normalised.url!);
+      if (!probe.reachable) {
+        setNoteTone('error');
+        setNote(probe.detail);
+        return;
+      }
+      await saveServerUrl(normalised.url!);
+      refreshServerUrl();
+      setDraft(normalised.url!);
+      setNoteTone('ok');
+      setNote(`تم الحفظ — ${probe.appName ?? 'الخادم'}${probe.version ? ` ${probe.version}` : ''} متاح.`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function useDefault() {
+    const restored = await clearServerUrl();
+    refreshServerUrl();
+    setDraft(restored);
+    setNoteTone('info');
+    setNote('تم الرجوع إلى العنوان المضمّن في التطبيق.');
+  }
+
+  return (
+    <Card>
+      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+        <Text style={{ color: theme.textMuted, fontSize: 12 }} numberOfLines={1}>
+          الخادم: {serverUrl}
+        </Text>
+        <Button
+          title={expanded ? 'إخفاء' : 'تغيير'}
+          variant="ghost"
+          onPress={() => {
+            setExpanded((value) => !value);
+            setNote(null);
+          }}
+        />
+      </View>
+      {expanded && (
+        <View style={{ gap: 8 }}>
+          <Field
+            label="عنوان الخادم"
+            value={draft}
+            onChangeText={setDraft}
+            autoCapitalize="none"
+            autoCorrect={false}
+            keyboardType="url"
+            placeholder="http://192.168.1.20:8787"
+            hint="منفذ الـAPI (‏8787 افتراضياً) لا منفذ الويب. مثال: https://chat.example.com"
+          />
+          {note ? (
+            <Text
+              style={{
+                color: noteTone === 'error' ? theme.danger : noteTone === 'ok' ? theme.success : theme.textMuted,
+                fontSize: 12,
+              }}
+            >
+              {note}
+            </Text>
+          ) : null}
+          <Button title="اختبار وحفظ" onPress={testAndSave} loading={busy} disabled={!draft} />
+          {usingOverride() && <Button title={`العودة إلى ${DEFAULT_API_URL}`} variant="ghost" onPress={useDefault} />}
+        </View>
+      )}
+    </Card>
+  );
+}
 
 /** Sign-in screen. Mirrors the server policy: identifier + password (+ optional TOTP). */
 export function LoginScreen({ onSwitchToRegister }: { onSwitchToRegister: () => void }) {
@@ -34,6 +141,8 @@ export function LoginScreen({ onSwitchToRegister }: { onSwitchToRegister: () => 
       <ScrollView contentContainerStyle={{ gap: 16, paddingVertical: 24 }} keyboardShouldPersistTaps="handled">
         <Text style={{ color: theme.text, fontSize: 28, fontWeight: '800' }}>سيادي</Text>
         <Text style={{ color: theme.textMuted }}>منصة تواصل على خادمك: مراسلة، قنوات، شبكة اجتماعية، ومكالمات.</Text>
+
+        <ServerSection />
 
         <Card>
           <Field
