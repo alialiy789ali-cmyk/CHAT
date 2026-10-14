@@ -8,6 +8,14 @@ import {
 } from '@sovereign/shared/validation';
 import type { ServiceContainer } from '../services/container.js';
 import { clientIp, type RequestContext } from '../services/context.js';
+import { AppError } from '../lib/errors.js';
+
+/** Route params are strings from the URL; a malformed id is a client error, not a 500. */
+function assertUuid(value: string, field: string): void {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) {
+    throw new AppError('validation_error', 'invalid_request', [{ path: field, message: 'expected a uuid' }]);
+  }
+}
 
 /**
  * E2EE key distribution endpoints.
@@ -36,6 +44,22 @@ export async function registerKeyRoutes(app: FastifyInstance, container: Service
     const session = await deps.repos.sessions.findSession(request.auth!.sessionId);
     return session?.device_id ?? null;
   };
+
+  /**
+   * Ciphertext for the calling device only.
+   *
+   * Real-time frames deliberately carry no ciphertext: one frame reaches every device of every
+   * member, while each device needs its own envelope. The receiving client asks here instead.
+   */
+  app.get(
+    '/messages/:messageId/envelope',
+    { preHandler: [app.authenticate], schema: { tags: ['e2ee'] } },
+    async (request) => {
+      const { messageId } = request.params as { messageId: string };
+      assertUuid(messageId, 'messageId');
+      return keys.envelopeForDevice(messageId, request.auth!.userId, await sessionDeviceId(request));
+    },
+  );
 
   app.put('/keys/identity', { preHandler: [app.authenticate], schema: { tags: ['e2ee'] } }, async (request) => {
     const body = deviceKeyBundleSchema.parse(request.body ?? {});

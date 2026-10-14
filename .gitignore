@@ -34,3 +34,7 @@ infra/backups/*
 !infra/backups/README.md
 infra/nginx/certs/*
 !infra/nginx/certs/README.md
+
+# Olm's WebAssembly payload is copied from the pinned dependency by
+# `apps/web/scripts/copy-olm-wasm.mjs` (npm predev/prebuild), never vendored.
+apps/web/public/olm.wasm

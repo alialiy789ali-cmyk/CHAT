@@ -13,27 +13,36 @@
 ### التشفير الطرفي (E2EE)
 
 يوزّع الخادم **المفاتيح العامة** وينقل **النص المشفّر** كما هو. لا يستقبل الخادم مفتاحاً خاصاً
-أبداً، ولا يستطيع فك المحتوى.
+أبداً، ولا يستطيع فك المحتوى. مخططان مدعومان: `libsignal-v1` (تطبيق الجوال) و`olm-v1` (تطبيق الويب).
 
 | الطريقة | المسار | الوصف |
 | --- | --- | --- |
-| PUT | `/keys/identity` | نشر/تدوير مفاتيح الجهاز: `{identityKey, registrationId, signedPreKey{id,publicKey,signature}, kyberPreKey?, oneTimePreKeys[]}` (base64) → `{deviceId, identityRotated, oneTimePreKeysStored}` |
+| PUT | `/keys/identity` | نشر/تدوير مفاتيح جهاز Signal: `{identityKey, registrationId, signedPreKey{id,publicKey,signature}, kyberPreKey?, oneTimePreKeys[]}` (base64) → `{deviceId, identityRotated, oneTimePreKeysStored}` |
 | POST | `/keys/prekeys` | تعبئة prekeys لمرة واحدة `{oneTimePreKeys[]}` عندما ينخفض العدد |
-| GET | `/keys/me` | جرد المفاتيح لكل جهاز (`remainingOneTimePreKeys`, `hasKyberPreKey`) |
-| GET | `/keys/:userId` | حِزم الأجهزة للطرف الآخر — **يُستهلك prekey واحد لكل جهاز** عند كل طلب، ويحترم الخصوصية والحظر |
+| PUT | `/keys/identity/olm` | نشر/تدوير جهاز Olm (الويب): `{deviceId?, identityKey, signingKey, signature, oneTimeKeys[{id,key}]}` → `{deviceId, algorithm: 'olm-v1', identityRotated, oneTimeKeysStored}` |
+| POST | `/keys/prekeys/olm` | تعبئة مفاتيح Olm لمرة واحدة `{deviceId?, oneTimeKeys[]}` → `{oneTimeKeysStored}` |
+| GET | `/keys/me` | جرد لكل جهاز: `{deviceId, algorithm, signingKey, remainingOneTimePreKeys, identityKey, verifiedAt}` |
+| GET | `/keys/:userId` | حِزم الأجهزة للطرف الآخر — **يُستهلك مفتاح لمرة واحدة لكل جهاز** عند كل طلب، ويحترم الخصوصية والحظر. حزمة Olm تحمل `signingKey` + `identitySignature` ليتمكن العميل من التحقق الذاتي |
 | POST | `/keys/verify` | `{deviceId, fingerprint, verified}` — تحقق **لك أنت وحدك** من بصمة جهاز الطرف الآخر |
-| GET | `/keys/verify/:userId` | حالة التحقق لكل أجهزة المستخدم كما تراها أنت (`verifiedCount`, `allVerified`) |
-| GET | `/conversations/:id/encryption` | حالة التشفير + جاهزية كل مشارك (`participants[].ready`) |
+| GET | `/keys/verify/:userId` | حالة التحقق لكل أجهزة المستخدم كما تراها أنت، مع `identityKey`/`signingKey` العامّين لحساب رقم الأمان محلياً |
+| GET | `/conversations/:id/encryption` | حالة التشفير + جاهزية كل مشارك (`participants[].ready`, `participants[].algorithms`) |
 | POST | `/conversations/:id/encryption` | `{enabled}` — للتفعيل يشترط أن يكون **كل** مشارك قد نشر مفاتيح، وإلا 409 `participant_without_keys:<id>` |
+| GET | `/messages/:messageId/envelope` | **مغلّف هذا الجهاز فقط** لرسالة (`{envelope}` أو `null`) — العضو فقط، والإطارات اللحظية لا تحمل نصاً مشفّراً |
 
 ملاحظات تشغيلية مهمة:
 
-- كل ما سبق معطّل ما لم يكن `E2EE_ENABLED=true`، وعند التعطيل يرد الخادم 501
+- كل ما سبق معطّل ما لم يكن `E2EE_ENABLED=true` (وهو الافتراضي)، وعند التعطيل يرد الخادم 501
   `e2ee_not_available` بدل القبول الصوري.
-- الرسائل المشفّرة تُرسل عبر نفس مسار الرسائل العادي:
-  `POST /conversations/:id/messages {clientMessageId, ciphertext, encryptionScheme: 'libsignal-v1'}`
-  ويعود `body: null` مع `ciphertext` — الطرف الآخر يفكّها على جهازه.
-- في المحادثة المشفّرة يرفض الخادم النص العادي (501) حتى لا يحدث «تخفيض صامت» للتشفير.
+- الإرسال المشفّر يستخدم **مغلّفاً لكل جهاز**:
+  `POST /conversations/:id/messages {clientMessageId, body: '', encryptionScheme: 'olm-v1', envelopes:[{deviceId, scheme, ciphertext}]}`
+  ويُرفض بـ400 `envelope_for_unknown_device` أي مغلّف موجّه لجهاز خارج المحادثة. الرد يعيد
+  `body: null` و`envelopes: []` (مغلّفات الآخرين ليست من حق المرسل).
+- الشكل القديم بمغلّف واحد (`ciphertext` + `encryptionScheme`) ما زال مقبولاً للتوافق.
+- الرسائل اللحظية (`t: 'message'`) تحمل البيانات الوصفية فقط وبلا `envelopes`؛ كل جهاز يجلب
+  مغلّفه من `GET /messages/:id/envelope`.
+- في المحادثة المشفّرة يرفض الخادم النص العادي (501) حتى لا يحدث «تخفيض صامت» للتشفير، كما يرفض
+  تعديل رسالة مشفّرة (`cannot_edit_ciphertext_message`) وإعادة توجيهها
+  (`cannot_forward_ciphertext_message`).
 - قناة ومنشورات القنوات **ليست** مشفّرة طرفياً بطبيعتها (محتوى عام/واسع الانتشار) ويجب أن يظهر
   ذلك بصراحة في الواجهة.
 - البحث في الرسائل لا يمكن أن يعثر على رسائل مشفّرة: لا يوجد `body` ليفهرسه الخادم.

@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from 'next';
 import './globals.css';
 import { SessionProvider } from '@/lib/session';
+import { E2eeProvider } from '@/lib/e2ee/context';
 
 export const metadata: Metadata = {
   title: 'سيادي · Sovereign',
@@ -30,7 +31,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           تخطَّ إلى المحتوى
         </a>
         <SessionProvider>
-          <div id="main">{children}</div>
+          {/* E2EE depends on the session (user + device), so it nests inside it. */}
+          <E2eeProvider>
+            <div id="main">{children}</div>
+          </E2eeProvider>
         </SessionProvider>
       </body>
     </html>

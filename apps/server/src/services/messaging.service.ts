@@ -492,7 +492,11 @@ export class MessagingService {
         messageId: message.id,
         senderId: input.senderId,
         recipientIds,
-        message: dto,
+        // Real-time fan-out is addressless: one frame reaches every device of every member, so it
+        // must not carry a ciphertext addressed to one particular device. Receivers fetch their
+        // own envelope (GET /api/messages/:id/envelope); the plaintext-metadata fields below are
+        // all a notification needs.
+        message: { ...dto, envelopes: [] },
         mentionIds: input.mentions ?? [],
         at: message.created_at,
       });
@@ -512,7 +516,12 @@ export class MessagingService {
     if (Date.now() - existing.created_at.getTime() > 48 * 3600 * 1000) {
       throw new AppError('forbidden', 'edit_window_expired');
     }
-    if (existing.ciphertext) throw new AppError('e2ee_not_available', 'cannot_edit_ciphertext_message');
+    // An edit carries plaintext. In the envelope model `messages.ciphertext` stays empty, so the
+    // scheme column — not just the legacy column — has to decide this, or editing would quietly
+    // write readable text into an encrypted conversation.
+    if (existing.ciphertext || existing.encryption_scheme !== 'none') {
+      throw new AppError('e2ee_not_available', 'cannot_edit_ciphertext_message');
+    }
 
     const updated = await this.messages.updateBody(messageId, actorId, body);
     if (!updated) throw new AppError('message_not_found');
@@ -565,6 +574,20 @@ export class MessagingService {
     const source = await this.messages.findById(messageId);
     if (!source) throw new AppError('message_not_found');
     await this.requireMembership(source.conversation_id, actorId);
+    const target = await this.conversations.findById(targetConversationId);
+    assert(target, 'not_found', 'conversation_not_found');
+    await this.requireMembership(targetConversationId, actorId);
+
+    // A ciphertext is addressed to the devices of the original conversation. Copying it would
+    // produce a bubble nobody can read (and copying the plaintext would break the sender's
+    // encryption), so the client has to re-encrypt: it decrypts, then sends a fresh message.
+    if (source.encryption_scheme !== 'none') {
+      throw new AppError('e2ee_not_available', 'cannot_forward_ciphertext_message');
+    }
+    if (target.is_encrypted) {
+      throw new AppError('e2ee_not_available', 'encrypted_conversation_requires_ciphertext');
+    }
+
     const attachments = await this.files.listForMessage(messageId);
     // Attachments are copied by reference only within the same conversation; crossing
     // conversations would leak files, so forwards carry text and re-upload media.

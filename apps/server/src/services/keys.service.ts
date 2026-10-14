@@ -203,6 +203,27 @@ export class KeysService {
     return { deviceId: device.id, algorithm: 'olm-v1' as const, oneTimeKeysStored: total };
   }
 
+  /**
+   * The envelope addressed to one specific device for one message.
+   *
+   * Real-time frames carry no ciphertext for encrypted conversations: a single frame is fanned
+   * out to every device of every member, and each device needs a *different* envelope. Handing
+   * out the right one is therefore a device-scoped request, and membership is re-checked here so
+   * the endpoint cannot be used as an oracle for other people's conversations.
+   */
+  async envelopeForDevice(messageId: string, userId: string, deviceId: string | null) {
+    const message = await this.deps.repos.messages.findById(messageId);
+    assert(message, 'not_found', 'message_not_found');
+    await this.requireMembership(message.conversation_id, userId);
+    if (!deviceId) return { messageId, envelope: null };
+    const rows = await this.deps.repos.messages.envelopesForDevice([messageId], deviceId);
+    const row = rows[0];
+    return {
+      messageId,
+      envelope: row ? { deviceId, scheme: row.scheme as 'libsignal-v1' | 'olm-v1', ciphertext: row.ciphertext } : null,
+    };
+  }
+
   /** ---------------------------------------------------------------- distribution */
 
   /**

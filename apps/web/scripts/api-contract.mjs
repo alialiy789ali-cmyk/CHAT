@@ -16,6 +16,17 @@ const stamp = Date.now().toString(36);
 console.log('\n[1] auth through the proxy');
 const reg = await call('/api/auth/register', { method: 'POST', body: { username: `webcheck_${stamp}`, email: `web_${stamp}@example.test`, password: 'Sovereign-Web-2026', displayName: 'فحص الويب', device: { name: 'node', platform: 'web' } } });
 ok('register 201', reg.status === 201, `status=${reg.status} ${reg.raw?.slice(0, 120)}`);
+if (reg.status !== 201) {
+  // Registration is rate limited by design (10 per 10 minutes per IP). Continuing would produce a
+  // cascade of misleading failures, so stop with the real reason instead.
+  if (reg.status === 429) {
+    console.error(`\nRegistration is rate limited (retry in ${reg.json?.error?.retryAfterSeconds ?? '?'}s). ` +
+      'Wait for the window to pass, or run this check against a server with a higher limit.\n');
+  } else {
+    console.error(`\nRegistration failed: ${reg.raw?.slice(0, 200)}\n`);
+  }
+  process.exit(1);
+}
 ok('refresh cookie set', (reg.cookies ?? []).some((c) => c.startsWith('sovereign_refresh=')));
 const token = reg.json?.accessToken;
 
@@ -155,7 +166,90 @@ console.log('\n[6] authenticated media (browser tags cannot send headers)');
   }
 }
 
-console.log('\n[7] cleanup (the script must not leak sessions)');
+console.log('\n[7] end-to-end encryption endpoints (web client contract)');
+{
+  // The web client publishes an Olm device, asks for a peer bundle, and reads its own envelope.
+  // A stand-in identity is enough here: this section checks the *contract* the UI depends on
+  // (field names, status codes, scoping). Real crypto in the browser is covered by
+  // `npm run test:e2ee -w @sovereign/web`, which drives the actual client modules.
+  const fakeKey = Buffer.alloc(32, 7).toString('base64');
+  const fakeSig = Buffer.alloc(64, 9).toString('base64');
+
+  const sessions = await call('/api/auth/sessions', { token });
+  const deviceId = sessions.json?.find?.((entry) => entry.current)?.deviceId;
+  ok('session list exposes the current device id', typeof deviceId === 'string', `deviceId=${deviceId}`);
+
+  const publish = await call('/api/keys/identity/olm', {
+    method: 'PUT',
+    token,
+    body: {
+      deviceId,
+      identityKey: fakeKey,
+      signingKey: fakeKey,
+      signature: fakeSig,
+      oneTimeKeys: [{ id: 'AAAAAA', key: fakeKey }],
+    },
+  });
+  ok('PUT /keys/identity/olm 200', publish.status === 200 && publish.json?.algorithm === 'olm-v1', `status=${publish.status}`);
+
+  const inventory = await call('/api/keys/me', { token });
+  const own = inventory.json?.devices?.find((entry) => entry.deviceId === deviceId);
+  ok('GET /keys/me reports the Olm device + pool', own?.algorithm === 'olm-v1' && typeof own?.remainingOneTimePreKeys === 'number', JSON.stringify(own));
+
+  const bundle = await call(`/api/keys/${me.json.id}`, { token: layla });
+  const first = bundle.json?.bundles?.[0];
+  ok('GET /keys/:id returns a scheme-tagged bundle', bundle.status === 200 && typeof first?.algorithm === 'string' && typeof first?.identityKey === 'string');
+  ok('Olm bundle carries signing key + signature', Boolean(first?.signingKey && first?.identitySignature) || first?.algorithm === 'libsignal-v1');
+
+  const replenish = await call('/api/keys/prekeys/olm', {
+    method: 'POST',
+    token,
+    body: { deviceId, oneTimeKeys: [{ id: 'AAAAAB', key: fakeKey }] },
+  });
+  ok('POST /keys/prekeys/olm tops the pool up', replenish.status === 200 && replenish.json?.oneTimeKeysStored >= 2, `status=${replenish.status}`);
+
+  // Envelope scoping: a ciphertext addressed to a device outside the conversation is refused,
+  // while one addressed to a member device is stored and never echoed back to the sender.
+  const conv = await call('/api/conversations/direct', { method: 'POST', token, body: { userId: laylaMe.json.id } });
+  const convId = conv.json?.conversation?.id;
+  const strangerDevice = '11111111-2222-4333-8444-555555555555';
+  const foreign = await call(`/api/conversations/${convId}/messages`, {
+    method: 'POST',
+    token,
+    body: {
+      clientMessageId: `webcheck-olm-foreign-${stamp}`,
+      body: '',
+      encryptionScheme: 'olm-v1',
+      envelopes: [{ deviceId: strangerDevice, scheme: 'olm-v1', ciphertext: JSON.stringify({ type: 1, body: 'x' }) }],
+    },
+  });
+  ok('envelope for an unknown device is rejected', foreign.status === 400, `status=${foreign.status}`);
+
+  const stored = await call(`/api/conversations/${convId}/messages`, {
+    method: 'POST',
+    token,
+    body: {
+      clientMessageId: `webcheck-olm-${stamp}`,
+      body: '',
+      encryptionScheme: 'olm-v1',
+      envelopes: [{ deviceId, scheme: 'olm-v1', ciphertext: JSON.stringify({ type: 1, body: 'ciphertext-for-own-device' }) }],
+    },
+  });
+  ok('ciphertext with an empty body is accepted', stored.status === 201 && stored.json?.message?.body === null, `status=${stored.status}`);
+  ok('message DTO carries the scheme', stored.json?.message?.encryptionScheme === 'olm-v1');
+  ok('sender response leaks no envelope', Array.isArray(stored.json?.message?.envelopes) && stored.json.message.envelopes.length === 0);
+  const mine = await call(`/api/messages/${stored.json.message.id}/envelope`, { token });
+  ok('own envelope is returned to the owning device', mine.status === 200 && mine.json?.envelope?.ciphertext?.includes('ciphertext-for-own-device'), JSON.stringify(mine.json)?.slice(0, 120));
+  const notMine = await call(`/api/messages/${stored.json.message.id}/envelope`, { token: layla });
+  ok('the peer device gets no envelope for it', notMine.status === 200 && notMine.json?.envelope === null, JSON.stringify(notMine.json)?.slice(0, 120));
+
+  const missing = await call('/api/messages/00000000-0000-4000-8000-000000000000/envelope', { token });
+  ok('envelope endpoint 404s for an unknown message', missing.status === 404, `status=${missing.status}`);
+  const malformed = await call('/api/messages/not-a-uuid/envelope', { token });
+  ok('envelope endpoint 400s for a malformed id', malformed.status === 400, `status=${malformed.status}`);
+}
+
+console.log('\n[8] cleanup (the script must not leak sessions)');
 {
   // Each run logs in as the demo user; without this, repeated runs would eventually hit the
   // 10-active-session cap. Logging out is also the last real behaviour we assert here.

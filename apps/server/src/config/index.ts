@@ -111,10 +111,16 @@ const envSchema = z.object({
   UPLOAD_MAX_BYTES: z.coerce.number().int().default(50 * 1024 * 1024),
 
   // ---------------------------------------------------------------- E2EE
-  /** When false (default) the server rejects ciphertext envelopes: E2EE is not implemented yet. */
+  /**
+   * End-to-end encryption is on by default: both ratchets (Signal for mobile, Matrix Olm for the
+   * web client) are implemented and proven by the acceptance suite, and a server that quietly
+   * accepted plaintext instead would weaken every conversation. Set `E2EE_ENABLED=false` only to
+   * debug the unencrypted path — the API then *rejects* ciphertext rather than storing it as
+   * readable text, so the downgrade is always visible.
+   */
   E2EE_ENABLED: z
     .string()
-    .default('false')
+    .default('true')
     .transform((v) => v === 'true'),
 });
 

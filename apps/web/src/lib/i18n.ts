@@ -97,8 +97,60 @@ const strings: Dict = {
     en: 'Verify your email to unlock every feature.',
   },
   e2eeNotice: {
-    ar: 'التشفير طرفي قيد التنفيذ ولم يُفعّل بعد. الرسائل محمية أثناء النقل (TLS) ومخزّنة على خادمك.',
-    en: 'End-to-end encryption is implemented and being verified; it is not enabled yet. Messages are protected in transit (TLS) and stored on your own server.',
+    ar: 'المحادثات المشفّرة تُنشئ مفاتيح على جهازك أنت فقط؛ الخادم يمرّر نصوصاً مشفّرة لا يستطيع قراءتها. المفاتيح الخاصة لا تغادر المتصفح.',
+    en: 'Encrypted conversations keep their keys on your device only; the server relays ciphertext it cannot read. Private keys never leave the browser.',
+  },
+  /* ------------------------------------------------------------------ E2EE */
+  encryption: { ar: 'التشفير', en: 'Encryption' },
+  encrypted: { ar: 'مشفّرة طرفياً', en: 'End-to-end encrypted' },
+  notEncrypted: { ar: 'غير مشفّرة', en: 'Not encrypted' },
+  enableEncryption: { ar: 'تفعيل التشفير', en: 'Enable encryption' },
+  disableEncryption: { ar: 'إيقاف التشفير', en: 'Turn encryption off' },
+  encryptionReady: { ar: 'كل الأجهزة جاهزة للتشفير', en: 'Every device is ready for encryption' },
+  encryptionNotReady: {
+    ar: 'لا يمكن تفعيل التشفير: بعض المشاركين لم ينشئوا مفاتيح بعد.',
+    en: 'Encryption cannot be enabled: some participants have not created keys yet.',
+  },
+  verifyingDevice: { ar: 'التحقق من الأجهزة', en: 'Verify devices' },
+  deviceKeys: { ar: 'أجهزة هذا المستخدم', en: "This user's devices" },
+  myDevices: { ar: 'أجهزتي', en: 'My devices' },
+  deviceFingerprint: { ar: 'بصمة الجهاز', en: 'Device fingerprint' },
+  safetyNumber: { ar: 'رقم الأمان', en: 'Safety number' },
+  safetyNumberHelp: {
+    ar: 'قارن هذا الرقم مع الطرف الآخر عبر قناة أخرى (مكالمة أو لقاء مباشر). تطابق الأرقام يعني أنه لا يوجد طرف ثالث بينكما.',
+    en: 'Compare these digits with your contact over another channel (a call, or in person). Matching numbers mean nobody is in the middle.',
+  },
+  markVerified: { ar: 'تأكيد التحقق', en: 'Mark as verified' },
+  markUnverified: { ar: 'إلغاء التحقق', en: 'Remove verification' },
+  verified: { ar: 'مُوثَّق', en: 'Verified' },
+  unverified: { ar: 'غير مُوثَّق', en: 'Not verified' },
+  keyChanged: {
+    ar: 'تغيّر مفتاح هذا الجهاز. تحقّق من الرقم قبل الثقة به.',
+    en: "This device's key changed. Verify the number before trusting it.",
+  },
+  deviceKeysPublished: { ar: 'مفاتيح الجهاز منشورة', en: 'Device keys published' },
+  oneTimeKeysLeft: { ar: 'مفاتيح لمرّة واحدة متبقية', en: 'one-time keys left' },
+  lockedMessage: {
+    ar: '🔒 رسالة مشفّرة — هذا الجهاز لا يملك مفتاحها.',
+    en: '🔒 Encrypted message — this device does not hold its key.',
+  },
+  decrypting: { ar: 'جارٍ فك التشفير…', en: 'Decrypting…' },
+  decryptFailed: {
+    ar: '⚠️ تعذّر فك التشفير (قد يكون الجهاز أُعيد تعيينه).',
+    en: '⚠️ Decryption failed (the device may have been reset).',
+  },
+  e2eeUnsupported: {
+    ar: 'متصفحك لا يدعم التخزين المشفّر المطلوب، لذا تعطّل التشفير طرفياً على هذا الجهاز.',
+    en: 'This browser lacks the required secure-storage APIs, so end-to-end encryption is off on this device.',
+  },
+  e2eeBlocked: {
+    ar: 'تعذّر إرسال رسالة مشفّرة: أحد المشاركين بلا جهاز مهيّأ.',
+    en: 'Could not send an encrypted message: a participant has no ready device.',
+  },
+  securityCenter: { ar: 'مركز الأمان', en: 'Security centre' },
+  attachmentsNotEncrypted: {
+    ar: 'المرفقات غير مشفّرة طرفياً بعد، لذلك تُعطَّل في المحادثات المشفّرة.',
+    en: 'Attachments are not end-to-end encrypted yet, so they are disabled in encrypted chats.',
   },
 };
 

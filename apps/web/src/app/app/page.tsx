@@ -15,6 +15,9 @@ import {
   useConversationMessages,
 } from '@/components/chat';
 import { CallOverlay, useCall } from '@/components/call';
+import { SecurityPanel } from '@/components/e2ee/security-panel';
+import { useE2ee } from '@/lib/e2ee/context';
+import { useDecryption } from '@/lib/e2ee/use-decryption';
 
 /** Messaging workspace: conversation list, active thread, composer and call controls. */
 
@@ -30,8 +33,14 @@ export default function ChatsPage() {
 
   const call = useCall();
   const { messages, setMessages, loading: messagesLoading, typingUsers } = useConversationMessages(activeId);
+  const { engine, status: e2eeStatus, error: e2eeError } = useE2ee();
+  const [showSecurity, setShowSecurity] = useState(false);
 
   const active = useMemo(() => conversations.find((conversation) => conversation.id === activeId) ?? null, [conversations, activeId]);
+
+  // Plaintext for this device, derived from the envelopes addressed to it. Messages the server
+  // cannot hand this device a key for stay explicitly marked instead of rendering as empty.
+  const decryption = useDecryption(engine, viewer?.id ?? null, messages);
 
   const loadConversations = useCallback(async () => {
     const result = await api.get<{ items: Conversation[] }>('/api/conversations');
@@ -167,6 +176,23 @@ export default function ChatsPage() {
                   {active.isEncrypted && ' · E2EE'}
                 </p>
               </div>
+              <Button
+                variant="ghost"
+                className="px-2 py-1"
+                onClick={() => setShowSecurity(true)}
+                aria-label={tr('securityCenter')}
+                title={
+                  e2eeError
+                    ? e2eeError === 'e2ee_unsupported_browser'
+                      ? tr('e2eeUnsupported')
+                      : e2eeError
+                    : active.isEncrypted
+                      ? tr('encrypted')
+                      : tr('notEncrypted')
+                }
+              >
+                {active.isEncrypted ? '🔒' : '🔓'}
+              </Button>
               {active.type === 'direct' && (
                 <div className="flex items-center gap-1">
                   <Button variant="ghost" className="px-2 py-1" onClick={() => void call.start(active.id, 'audio')} aria-label={tr('audioCall')}>
@@ -191,6 +217,8 @@ export default function ChatsPage() {
                 if (next === null || next.trim() === message.body) return;
                 await api.patch(`/api/messages/${message.id}`, { body: next.trim() });
               }}
+              plaintext={decryption.plaintext}
+              lockState={decryption.lockState}
               onDelete={async (message) => {
                 if (!window.confirm('حذف الرسالة للجميع؟')) return;
                 await api.del(`/api/messages/${message.id}`);
@@ -206,7 +234,16 @@ export default function ChatsPage() {
               conversationId={active.id}
               replyingTo={replyTo}
               onCancelReply={() => setReplyTo(null)}
+              encrypted={active.isEncrypted && Boolean(engine)}
+              engine={engine}
               onSent={(message) => setMessages((current) => (current.some((m) => m.id === message.id) ? current : [...current, message]))}
+            />
+
+            <SecurityPanel
+              open={showSecurity}
+              onClose={() => setShowSecurity(false)}
+              conversationId={active.id}
+              conversationTitle={active.title ?? 'محادثة'}
             />
           </>
         ) : (

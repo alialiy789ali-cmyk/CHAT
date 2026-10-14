@@ -26,10 +26,20 @@ export class ApiError extends Error {
 
 type Listener = (state: { accessToken: string | null }) => void;
 
-class ApiClient {
+export class ApiClient {
   private accessToken: string | null = null;
+  /**
+   * Origin to call. Empty in the browser (same-origin requests through the web app's proxy);
+   * set by scripts and tests that drive the real client modules from Node.
+   */
+  private baseUrl = '';
   private refreshPromise: Promise<boolean> | null = null;
   private listeners = new Set<Listener>();
+
+  /** Points the client at an absolute origin. Only used outside the browser. */
+  setBaseUrl(url: string): void {
+    this.baseUrl = url.replace(/\/$/, '');
+  }
 
   setAccessToken(token: string | null): void {
     this.accessToken = token;
@@ -51,7 +61,7 @@ class ApiClient {
     if (init.body && !(init.body instanceof FormData) && !headers.has('content-type')) {
       headers.set('content-type', 'application/json');
     }
-    return fetch(path, { ...init, headers, credentials: 'include' });
+    return fetch(`${this.baseUrl}${path}`, { ...init, headers, credentials: 'include' });
   }
 
   /** Refreshes the access token exactly once even under concurrent 401s. */
@@ -59,7 +69,7 @@ class ApiClient {
     if (this.refreshPromise) return this.refreshPromise;
     this.refreshPromise = (async () => {
       try {
-        const res = await fetch('/api/auth/refresh', {
+        const res = await fetch(`${this.baseUrl}/api/auth/refresh`, {
           method: 'POST',
           credentials: 'include',
           headers: { 'content-type': 'application/json' },
@@ -106,6 +116,10 @@ class ApiClient {
 
   post<T>(path: string, body?: unknown): Promise<T> {
     return this.request<T>(path, { method: 'POST', body: body === undefined ? undefined : JSON.stringify(body) });
+  }
+
+  put<T>(path: string, body?: unknown): Promise<T> {
+    return this.request<T>(path, { method: 'PUT', body: body === undefined ? undefined : JSON.stringify(body) });
   }
 
   patch<T>(path: string, body?: unknown): Promise<T> {
@@ -175,4 +189,8 @@ function deviceName(): string {
   return 'Web browser';
 }
 
+/**
+ * The browser has exactly one session at a time, so the app shares a singleton. Scripts and tests
+ * that drive several accounts in one process construct their own instances.
+ */
 export const api = new ApiClient();

@@ -6,6 +6,8 @@ import { realtime, newClientMessageId, newRequestId } from '@/lib/realtime';
 import { AttachmentView } from '@/components/media';
 import { Avatar, Badge, Button, EmptyState, Spinner, formatTime } from '@/components/ui';
 import { useT } from '@/lib/i18n';
+import type { E2eeEngine } from '@/lib/e2ee/engine';
+import type { MessageLockState } from '@/lib/e2ee/types';
 import type { ServerFrame } from '@sovereign/shared/protocol';
 
 /** Chat building blocks: conversation list, message thread and composer. */
@@ -37,6 +39,10 @@ export interface ChatMessage {
   sender: { id: string; username: string; displayName: string; avatarUrl: string | null } | null;
   attachments: Array<{ id: string; url: string; mimeType: string; fileName: string; sizeBytes: number; width: number | null; height: number | null; durationMs: number | null }>;
   replyTo: { id: string; body: string | null; senderUsername: string | null } | null;
+  /** 'none' for plaintext; a scheme name when this row is ciphertext for this device. */
+  encryptionScheme: 'none' | 'libsignal-v1' | 'olm-v1';
+  /** Ciphertext addressed to this device only (empty in real-time frames by design). */
+  envelopes?: Array<{ deviceId: string; scheme: 'libsignal-v1' | 'olm-v1'; ciphertext: string }>;
 }
 
 /* ------------------------------------------------------------------ list */
@@ -122,6 +128,8 @@ export function MessageThread({
   onReply,
   onEdit,
   onDelete,
+  plaintext,
+  lockState,
 }: {
   messages: ChatMessage[];
   viewerId: string;
@@ -131,6 +139,9 @@ export function MessageThread({
   onReply: (message: ChatMessage) => void;
   onEdit: (message: ChatMessage) => void;
   onDelete: (message: ChatMessage) => void;
+  /** Decrypted text per message id, produced by the E2EE engine on this device. */
+  plaintext?: Map<string, string>;
+  lockState?: Map<string, MessageLockState>;
 }) {
   const tr = useT();
   const bottom = useRef<HTMLDivElement | null>(null);
@@ -183,7 +194,14 @@ export function MessageThread({
                   <em className="opacity-70">حُذفت هذه الرسالة</em>
                 ) : (
                   <>
-                    {message.body && <p className="whitespace-pre-wrap break-words">{message.body}</p>}
+                    {message.encryptionScheme !== 'none' ? (
+                      <EncryptedBody
+                        text={plaintext?.get(message.id) ?? null}
+                        state={lockState?.get(message.id) ?? 'pending'}
+                      />
+                    ) : (
+                      message.body && <p className="whitespace-pre-wrap break-words">{message.body}</p>
+                    )}
                     {message.attachments.length > 0 && (
                       <div className="flex flex-wrap gap-2 pt-1">
                         {message.attachments.map((attachment) => (
@@ -230,6 +248,29 @@ export function MessageThread({
   );
 }
 
+/**
+ * Body of an encrypted message.
+ *
+ * The four states are shown distinctly on purpose: a blank bubble would hide the difference
+ * between "still decrypting", "this device has no key" and "the ciphertext did not authenticate".
+ */
+function EncryptedBody({ text, state }: { text: string | null; state: MessageLockState }) {
+  const tr = useT();
+  if (text) {
+    return (
+      <span className="flex items-start gap-1">
+        <span aria-hidden title={tr('encrypted')}>
+          🔒
+        </span>
+        <p className="whitespace-pre-wrap break-words">{text}</p>
+      </span>
+    );
+  }
+  if (state === 'failed') return <em className="text-xs opacity-80">{tr('decryptFailed')}</em>;
+  if (state === 'locked') return <em className="text-xs opacity-80">{tr('lockedMessage')}</em>;
+  return <em className="text-xs opacity-70">{tr('decrypting')}</em>;
+}
+
 /* ------------------------------------------------------------------ composer */
 
 export function Composer({
@@ -238,14 +279,20 @@ export function Composer({
   replyingTo,
   onCancelReply,
   disabled,
+  encrypted = false,
+  engine = null,
 }: {
   conversationId: string;
   onSent: (message: ChatMessage, duplicated: boolean) => void;
   replyingTo: ChatMessage | null;
   onCancelReply: () => void;
   disabled?: boolean;
+  /** True when the conversation is end-to-end encrypted; the message is then sent as envelopes. */
+  encrypted?: boolean;
+  engine?: E2eeEngine | null;
 }) {
   const tr = useT();
+  const attachmentsLocked = encrypted;
   const [text, setText] = useState('');
   const [uploading, setUploading] = useState(false);
   const [attachments, setAttachments] = useState<ChatMessage['attachments']>([]);
@@ -267,6 +314,54 @@ export function Composer({
     if (disabled) return;
     const body = text.trim();
     if (!body && attachments.length === 0) return;
+
+    // Encryption happens before anything reaches the network: the server only ever receives
+    // envelopes. Attachments are NOT encrypted yet, so sending them inside an encrypted
+    // conversation would put readable media next to ciphertext — refused instead of faked.
+    if (encrypted) {
+      if (attachments.length > 0) {
+        alert('المرفقات غير مشفّرة بعد ولم تُرسل. أرسل النص مشفّراً أو أزل المرفقات.');
+        return;
+      }
+      if (!body) return;
+      if (!engine) {
+        alert(tr('e2eeBlocked'));
+        return;
+      }
+      const clientMessageId = newClientMessageId();
+      const plaintextBody = body;
+      setText('');
+      onCancelReply();
+      try {
+        const status = await engine.conversationStatus(conversationId);
+        const { envelopes, skipped } = await engine.encryptForConversation(status, plaintextBody);
+        if (skipped.length > 0 || envelopes.length === 0) {
+          setText(plaintextBody);
+          alert(`${tr('e2eeBlocked')} (${skipped.map((entry) => entry.reason).join(', ') || 'no_devices'})`);
+          return;
+        }
+        const result = await api.post<{ message: ChatMessage; duplicated: boolean }>(
+          `/api/conversations/${conversationId}/messages`,
+          {
+            clientMessageId,
+            body: '',
+            replyToId: replyingTo?.id ?? null,
+            encryptionScheme: 'olm-v1',
+            envelopes,
+          },
+        );
+        // This device keeps its own plaintext locally, so the thread renders immediately and
+        // after a reload without asking the server for anything readable.
+        await engine.rememberSent({ messageId: result.message.id, conversationId, body: plaintextBody });
+        onSent(result.message, result.duplicated);
+      } catch (err) {
+        setText(plaintextBody);
+        console.error('encrypted send failed', err);
+        alert('تعذّر إرسال الرسالة المشفّرة.');
+      }
+      return;
+    }
+
     const clientMessageId = newClientMessageId();
     const attachmentIds = attachments.map((attachment) => attachment.id);
     setText('');
@@ -354,6 +449,12 @@ export function Composer({
 
   return (
     <form onSubmit={send} className="space-y-2 border-t p-3" style={{ borderColor: 'var(--border)' }}>
+      {encrypted && (
+        <p className="muted flex items-center gap-1 text-[11px]">
+          <span aria-hidden>🔒</span>
+          {tr('encrypted')} · {tr('attachmentsNotEncrypted')}
+        </p>
+      )}
       {replyingTo && (
         <div className="flex items-center justify-between rounded-lg px-3 py-1.5 text-xs" style={{ background: 'var(--surface-sunken)' }}>
           <span className="truncate">
@@ -403,14 +504,23 @@ export function Composer({
           accept="image/*,video/*,audio/*,application/pdf,text/plain,.zip"
           onChange={(event) => void upload(event.target.files)}
         />
-        <Button type="button" variant="ghost" onClick={() => fileInput.current?.click()} disabled={uploading} aria-label={tr('uploadFile')}>
+        <Button
+          type="button"
+          variant="ghost"
+          onClick={() => fileInput.current?.click()}
+          disabled={uploading || attachmentsLocked}
+          aria-label={tr('uploadFile')}
+          title={attachmentsLocked ? tr('attachmentsNotEncrypted') : undefined}
+        >
           {uploading ? <Spinner size={14} /> : '📎'}
         </Button>
         <Button
           type="button"
           variant="ghost"
           onClick={() => void toggleRecording()}
+          disabled={attachmentsLocked}
           aria-label={recording ? tr('stopRecording') : tr('startRecording')}
+          title={attachmentsLocked ? tr('attachmentsNotEncrypted') : undefined}
           style={recording ? { color: 'var(--danger)' } : undefined}
         >
           {recording ? '⏹' : '🎙'}
@@ -426,8 +536,15 @@ export function Composer({
 /** Merges an incoming realtime frame into the message list (dedup + ordering by time). */
 export function applyMessageFrame(messages: ChatMessage[], frame: ServerFrame): ChatMessage[] {
   if (frame.t !== 'message' && frame.t !== 'ack') return messages;
-  const payload = frame.t === 'ack' ? (frame.data as { message?: ChatMessage } | undefined)?.message : (frame.message as ChatMessage | undefined);
-  if (!payload || !payload.id) return messages;
+  const raw = frame.t === 'ack' ? (frame.data as { message?: ChatMessage } | undefined)?.message : (frame.message as ChatMessage | undefined);
+  if (!raw || !raw.id) return messages;
+  // Normalise the encryption fields: a frame that predates them (or a partial payload) must not be
+  // mistaken for ciphertext, which would render a plaintext message as "decrypting…" forever.
+  const payload: ChatMessage = {
+    ...raw,
+    encryptionScheme: raw.encryptionScheme ?? 'none',
+    envelopes: raw.envelopes ?? [],
+  };
   const merged = messages.some((message) => message.id === payload.id)
     ? messages.map((message) => (message.id === payload.id ? { ...message, ...payload } : message))
     : [...messages, payload];
