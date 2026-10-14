@@ -11,6 +11,7 @@
     "start": "NODE_ENV=production tsx server.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "check:api": "node scripts/api-contract.mjs",
+    "check:ui": "node --import tsx scripts/ui-state-check.mts",
     "test:e2ee": "tsx scripts/e2ee-live-test.mts"
   },
   "dependencies": {

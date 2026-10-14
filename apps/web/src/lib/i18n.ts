@@ -135,6 +135,7 @@ const strings: Dict = {
     en: '🔒 Encrypted message — this device does not hold its key.',
   },
   decrypting: { ar: 'جارٍ فك التشفير…', en: 'Decrypting…' },
+  emptyMessage: { ar: 'رسالة بلا نص', en: 'Message with no text' },
   decryptFailed: {
     ar: '⚠️ تعذّر فك التشفير (قد يكون الجهاز أُعيد تعيينه).',
     en: '⚠️ Decryption failed (the device may have been reset).',

@@ -80,6 +80,8 @@ jobs:
         run: npm run test:e2e
       - name: Mobile unit tests (Signal protocol, key store)
         run: npm run test -w @sovereign/mobile
+      - name: Web message-state checks (encrypted body, sealed files)
+        run: npm run check:ui -w @sovereign/web
       # The harness that decides whether the APK opened runs against a fake device here, because the
       # emulator job needs a GPU-less Android image and this check needs a second. A harness that
       # silently captures nothing is worse than no harness: it reports "no logs" as if that were a

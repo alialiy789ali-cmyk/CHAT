@@ -8,12 +8,14 @@ import {
   descriptorFor,
   encodeContent,
   parseContent,
+  type EncryptedContent,
   sealFileForUpload,
   type EncryptedFileDescriptor,
 } from '@/lib/e2ee/content';
 import { Avatar, Badge, Button, EmptyState, Spinner, formatTime } from '@/components/ui';
 import { useT } from '@/lib/i18n';
 import type { E2eeEngine } from '@/lib/e2ee/engine';
+import { bodyPresentation } from '@/lib/e2ee/presentation';
 import type { MessageLockState } from '@/lib/e2ee/types';
 import type { ServerFrame } from '@sovereign/shared/protocol';
 
@@ -188,6 +190,9 @@ export function MessageThread({
          * only a decrypted payload carries the file descriptors that make attachments openable.
          */
         const decrypted = message.encryptionScheme !== 'none' ? plaintext?.get(message.id) : undefined;
+        // Parsed once and used for both the body and the file descriptors: the same payload carries
+        // the text and the keys of its attachments, so it must not be interpreted twice.
+        const content: EncryptedContent | null = decrypted === undefined ? null : parseContent(decrypted);
         if (message.type === 'system') {
           return (
             <p key={message.id} className="muted text-center text-xs">
@@ -219,10 +224,7 @@ export function MessageThread({
                 ) : (
                   <>
                     {message.encryptionScheme !== 'none' ? (
-                      <EncryptedBody
-                        text={decrypted ? parseContent(decrypted).text : null}
-                        state={lockState?.get(message.id) ?? 'pending'}
-                      />
+                      <EncryptedBody content={content} state={lockState?.get(message.id) ?? 'pending'} />
                     ) : (
                       message.body && <p className="whitespace-pre-wrap break-words">{message.body}</p>
                     )}
@@ -233,9 +235,7 @@ export function MessageThread({
                             <EncryptedAttachmentView
                               key={attachment.id}
                               attachment={attachment}
-                              descriptor={
-                                decrypted ? descriptorFor(parseContent(decrypted).files, attachment.id) : null
-                              }
+                              descriptor={descriptorFor(content?.files ?? [], attachment.id)}
                             />
                           ) : (
                             <AttachmentView key={attachment.id} attachment={attachment} />
@@ -285,24 +285,35 @@ export function MessageThread({
 /**
  * Body of an encrypted message.
  *
- * The four states are shown distinctly on purpose: a blank bubble would hide the difference
- * between "still decrypting", "this device has no key" and "the ciphertext did not authenticate".
+ * All five states are shown distinctly on purpose: a blank bubble would hide the difference between
+ * "still decrypting", "this device has no key", "the ciphertext did not authenticate" and "this
+ * message is a file with no text". The last one renders nothing at all, because the attachment below
+ * it is the message — `bodyPresentation` is what keeps those apart, and it is unit-tested separately.
  */
-function EncryptedBody({ text, state }: { text: string | null; state: MessageLockState }) {
+function EncryptedBody({ content, state }: { content: EncryptedContent | null; state: MessageLockState }) {
   const tr = useT();
-  if (text) {
-    return (
-      <span className="flex items-start gap-1">
-        <span aria-hidden title={tr('encrypted')}>
-          🔒
+  const presentation = bodyPresentation(content, state);
+  switch (presentation.kind) {
+    case 'text':
+      return (
+        <span className="flex items-start gap-1">
+          <span aria-hidden title={tr('encrypted')}>
+            🔒
+          </span>
+          <p className="whitespace-pre-wrap break-words">{presentation.text}</p>
         </span>
-        <p className="whitespace-pre-wrap break-words">{text}</p>
-      </span>
-    );
+      );
+    case 'attachments':
+      return null;
+    case 'empty':
+      return <em className="text-xs opacity-70">{tr('emptyMessage')}</em>;
+    case 'failed':
+      return <em className="text-xs opacity-80">{tr('decryptFailed')}</em>;
+    case 'locked':
+      return <em className="text-xs opacity-80">{tr('lockedMessage')}</em>;
+    default:
+      return <em className="text-xs opacity-70">{tr('decrypting')}</em>;
   }
-  if (state === 'failed') return <em className="text-xs opacity-80">{tr('decryptFailed')}</em>;
-  if (state === 'locked') return <em className="text-xs opacity-80">{tr('lockedMessage')}</em>;
-  return <em className="text-xs opacity-70">{tr('decrypting')}</em>;
 }
 
 /* ------------------------------------------------------------------ composer */
