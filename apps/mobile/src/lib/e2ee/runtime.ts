@@ -1,7 +1,7 @@
 /**
  * Chooses the cryptographic implementation the Signal-protocol library runs on.
  *
- * **This file is security-critical, and it is imported first for that reason.**
+ * **This file is security-critical.** It resolves the runtime on first use (`ensureCryptoRuntime`).
  *
  * The pure-JavaScript Signal implementation reaches all of its primitives through one object — every
  * private key (`Internal.crypto.getRandomBytes`), every AES-CBC operation, every HMAC and every
@@ -67,37 +67,88 @@ function subtleSource(): { source: string; subtle: SubtleLike } | null {
   return null;
 }
 
-const random = randomSource();
-const subtle = subtleSource();
+export interface CryptoRuntimeReport {
+  /** True when the encryption layer can run on this device at all. */
+  available: boolean;
+  /** Where key material gets its entropy: `platform`, `expo-crypto`, or `none`. */
+  random: string;
+  /** Where AES/HMAC/SHA come from: `platform`, `bundled-pure-js`, or `none`. */
+  primitives: string;
+  /** True when the platform's own WebCrypto is used for both halves (browsers, Node). */
+  native: boolean;
+  /** Human-readable reason when `available` is false. */
+  reason: string | null;
+}
 
-if (!random || !subtle) {
-  throw new Error(
-    `e2ee_runtime_unavailable (random: ${random?.source ?? 'none'}, primitives: ${subtle?.source ?? 'none'}) — ` +
-      'install expo-crypto (native CSPRNG) or run where crypto.subtle exists',
-  );
+let report: CryptoRuntimeReport | null = null;
+let applied = false;
+
+/**
+ * Resolves the runtime **once**, on demand.
+ *
+ * It is deliberately not resolved at import time. The first version of this file threw from module
+ * scope when no random source was found, and since the engine imports it at the top of the start-up
+ * chain, a device where that resolution failed did not lose encryption — it lost the whole app, with
+ * a crash and no explanation. The security rule is unchanged (no keys are ever generated without a
+ * real CSPRNG), but it is now enforced where it belongs: at the moment encryption is asked for.
+ */
+function resolve(): CryptoRuntimeReport {
+  if (report) return report;
+  const random = randomSource();
+  const subtle = subtleSource();
+  const available = Boolean(random && subtle);
+  report = {
+    available,
+    random: random?.source ?? 'none',
+    primitives: subtle?.source ?? 'none',
+    native: random?.source === 'platform' && subtle?.source === 'platform',
+    reason: available
+      ? null
+      : 'لا يوجد مصدر عشوائية آمن على هذا الجهاز (expo-crypto / crypto.getRandomValues)، أو لا تتوفّر بدائيات التشفير — لذلك يُعطَّل التشفير الطرفي بدل توليد مفاتيح ضعيفة.',
+  };
+  if (available && !applied) {
+    /**
+     * A complete WebCrypto-shaped object for the library.
+     *
+     * Note what is *not* done here: no primitive is implemented in this project. Both parts come from
+     * audited implementations — one from the platform, one shipped by the protocol library itself.
+     */
+    setWebCrypto({
+      subtle: subtle!.subtle,
+      getRandomValues: random!.getRandomValues,
+    } as unknown as Crypto);
+    applied = true;
+  }
+  if (available && !report.native) {
+    // Printed once, on purpose: an operator should be able to see which implementations a device used
+    // when a key-verification question comes up.
+    console.info(`[e2ee] crypto runtime — randomness: ${report.random}, primitives: ${report.primitives}`);
+  }
+  return report;
 }
 
 /**
- * A complete WebCrypto-shaped object for the library.
- *
- * Note what is *not* done here: no primitive is implemented in this project. Both parts come from
- * audited implementations — one from the platform, one shipped by the protocol library itself.
+ * What the encryption layer runs on, for the settings screen and for diagnostics.
+ * Safe to call anywhere: it never throws and never generates anything.
  */
-setWebCrypto({
-  subtle: subtle.subtle,
-  getRandomValues: random.getRandomValues,
-} as unknown as Crypto);
+export function cryptoRuntime(): CryptoRuntimeReport {
+  return resolve();
+}
 
-/** Diagnostics for the settings screen and the logs: where keys and primitives actually come from. */
-export const cryptoRuntime = {
-  random: random.source,
-  primitives: subtle.source,
-  /** True when the platform's own WebCrypto is used for both halves (browsers, Node). */
-  native: random.source === 'platform' && subtle.source === 'platform',
-} as const;
-
-if (!cryptoRuntime.native) {
-  // Printed once, on purpose: an operator should be able to see which implementations a device used
-  // when a key-verification question comes up.
-  console.info(`[e2ee] crypto runtime — randomness: ${cryptoRuntime.random}, primitives: ${cryptoRuntime.primitives}`);
+/**
+ * Makes the runtime ready for the protocol library.
+ *
+ * Throws **only** when encryption is actually attempted on a device that cannot do it safely. Callers
+ * turn that into a visible state (the E2EE provider reports it and disables encrypted sends), which is
+ * the honest outcome: the rest of the app keeps working, and nothing claims to be encrypted.
+ */
+export function ensureCryptoRuntime(): CryptoRuntimeReport {
+  const resolved = resolve();
+  if (!resolved.available) {
+    throw new Error(
+      `e2ee_runtime_unavailable (random: ${resolved.random}, primitives: ${resolved.primitives}) — ` +
+        'install expo-crypto (native CSPRNG) or run where crypto.subtle exists',
+    );
+  }
+  return resolved;
 }

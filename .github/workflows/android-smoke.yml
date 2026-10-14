@@ -31,6 +31,7 @@ concurrency:
 
 permissions:
   contents: read
+  issues: write
 
 jobs:
   launch:
@@ -71,31 +72,49 @@ jobs:
           chmod +x gradlew
           ./gradlew --no-daemon :app:assembleRelease
 
-      # KVM is enabled on GitHub-hosted runners, so a real system image boots in ~2 minutes rather
-      # than emulating instructions on the CPU.
+      # Hardware acceleration must be switched on explicitly; without it the emulator cannot start and
+      # the action aborts with a bare exit code. (First attempt failed exactly this way, which is why
+      # the step below is here rather than assumed.)
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+
       - name: Launch on the emulator and capture the crash
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
           target: google_apis
           arch: x86_64
-          force-avd-creation: false
-          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          profile: pixel_6
+          emulator-boot-timeout: 900
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
-          # Long enough for a first launch of a Hermes bundle on a cold emulator.
+          # Every command is allowed to fail so that the diagnostics still get written: a missing log is
+          # what made the first failure unreadable.
           script: |
             set -x
+            echo "device state:" > diagnostics.txt
+            adb devices -l >> diagnostics.txt 2>&1
             APK=$(find apps/mobile/android/app/build/outputs/apk/release -name '*.apk' | head -n 1)
-            ls -lh "$APK"
-            adb install -r "$APK"
-            adb logcat -c
-            adb shell am start -W -n app.sovereign.client/.MainActivity || true
-            # Give the JS bundle time to load, then look at what the system recorded.
-            sleep 40
-            adb shell pidof app.sovereign.client > pid.txt || true
-            adb shell dumpsys activity activities > activities.txt || true
-            adb logcat -d > logcat.txt || true
-            adb logcat -d -b crash > crash.txt || true
+            echo "apk: $APK" >> diagnostics.txt
+            ls -lh "$APK" >> diagnostics.txt 2>&1
+            adb install -r "$APK" >> diagnostics.txt 2>&1
+            adb logcat -c || true
+            adb shell am start -W -n app.sovereign.client/.MainActivity > start.txt 2>&1 || true
+            cat start.txt >> diagnostics.txt
+            # Give the JS bundle time to load on a cold emulator, then read what the system recorded.
+            sleep 45
+            adb shell pidof app.sovereign.client > pid.txt 2>&1 || true
+            adb shell dumpsys activity activities > activities.txt 2>&1 || true
+            adb logcat -d > logcat.txt 2>&1 || true
+            adb logcat -d -b crash > crash.txt 2>&1 || true
+            echo "=== diagnostics ==="
+            cat diagnostics.txt || true
+            echo "=== fatal exceptions ==="
+            grep -B 5 -A 60 -E "FATAL EXCEPTION" logcat.txt crash.txt 2>/dev/null | head -n 200 || echo none
 
       - name: Report the outcome
         run: |
@@ -143,6 +162,51 @@ jobs:
             exit 1
           fi
 
+      # The failure report is also written into an issue, because step logs and artifacts are served
+      # from hosts that some networks (including the one this project is developed from) cannot reach.
+      # An issue is readable from anywhere, which is the point of a report.
+      - name: Publish the launch report
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "### Android launch check — \`${GITHUB_SHA::7}\`"
+            echo
+            echo "- Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo "- App process: $(cat pid.txt 2>/dev/null | tr -d '\r' | sed 's/^$/none (not running)/')"
+            echo
+            echo "<details><summary>start output</summary>"
+            echo
+            echo '```'
+            head -c 2000 start.txt 2>/dev/null || echo "no start output"
+            echo '```'
+            echo "</details>"
+            echo
+            echo "<details><summary>fatal exceptions</summary>"
+            echo
+            echo '```'
+            grep -B 5 -A 60 "FATAL EXCEPTION" logcat.txt crash.txt 2>/dev/null | head -c 8000 || echo none
+            echo '```'
+            echo "</details>"
+            echo
+            echo "<details><summary>app log lines</summary>"
+            echo
+            echo '```'
+            grep -E "sovereign|ReactNativeJS|Hermes|expo" logcat.txt 2>/dev/null | head -c 6000 || echo none
+            echo '```'
+            echo "</details>"
+          } > report.md
+
+          ISSUE=$(gh issue list --repo "$GITHUB_REPOSITORY" --search 'Android launch report in:title' --state open --json number -q '.[0].number' 2>/dev/null || echo "")
+          if [ -z "$ISSUE" ]; then
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "Android launch report" --body-file report.md || \
+              echo "could not open the report issue (contents are in the job summary)"
+          else
+            gh issue comment "$ISSUE" --repo "$GITHUB_REPOSITORY" --body-file report.md || \
+              echo "could not comment on the report issue"
+          fi
+
       - name: Keep the logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -153,5 +217,7 @@ jobs:
             crash.txt
             activities.txt
             pid.txt
+            start.txt
+            diagnostics.txt
           if-no-files-found: warn
           retention-days: 30

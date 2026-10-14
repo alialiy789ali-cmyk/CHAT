@@ -8,7 +8,7 @@
  * wrong, so the decisions are written down where they are taken.
  */
 /** Imported for its side effect: it decides which cryptographic implementation runs (see ./runtime). */
-import './runtime';
+import { ensureCryptoRuntime } from './runtime';
 import {
   KeyHelper,
   SessionBuilder,
@@ -67,6 +67,14 @@ export class MobileE2eeEngine {
    * this does is bind a device's key store to its id and make sure the server knows its keys.
    */
   static async create(options: MobileE2eeOptions): Promise<MobileE2eeEngine> {
+    /**
+     * The crypto runtime is prepared here, not at import time.
+     *
+     * A device without a usable random source must lose encryption — not the whole application — and
+     * the caller (the E2EE provider) turns this failure into a visible state with the reason, so a
+     * user sees "encryption is unavailable: …" instead of an app that closes on launch.
+     */
+    ensureCryptoRuntime();
     const engine = new MobileE2eeEngine(
       options.transport,
       new SignalStore(options.backend, options.deviceId),
