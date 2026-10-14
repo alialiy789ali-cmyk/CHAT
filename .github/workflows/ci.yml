@@ -80,6 +80,14 @@ jobs:
         run: npm run test:e2e
       - name: Mobile unit tests (Signal protocol, key store)
         run: npm run test -w @sovereign/mobile
+      # The harness that decides whether the APK opened runs against a fake device here, because the
+      # emulator job needs a GPU-less Android image and this check needs a second. A harness that
+      # silently captures nothing is worse than no harness: it reports "no logs" as if that were a
+      # result, which is exactly what happened twice before this test existed.
+      - name: Launch-capture harness (against a fake device)
+        run: |
+          sh -n .github/scripts/android-launch-capture.sh
+          sh .github/scripts/test-launch-capture.sh
       - name: Web build
         run: npm run build -w @sovereign/web
       - name: Server build

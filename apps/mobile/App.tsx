@@ -5,6 +5,7 @@ import { SessionProvider } from './src/lib/session';
 import { E2eeProvider } from './src/lib/e2ee/provider';
 import { Root } from './src/navigation';
 import { useTheme } from './src/lib/theme';
+import { ErrorBoundary } from './src/components/error-boundary';
 
 /**
  * App root.
@@ -32,16 +33,20 @@ export default function App() {
   }
 
   return (
-    <SafeAreaProvider>
-      <SessionProvider>
-        {/* E2EE sits inside the session because keys are per account *and* per device row. */}
-        <E2eeProvider>
-          <View style={styles.root}>
-            <Shell />
-          </View>
-        </E2eeProvider>
-      </SessionProvider>
-    </SafeAreaProvider>
+    // Outermost on purpose: whatever fails below — a provider, a screen, an event handler — the user
+    // gets a readable screen with a retry instead of a process that disappears.
+    <ErrorBoundary>
+      <SafeAreaProvider>
+        <SessionProvider>
+          {/* E2EE sits inside the session because keys are per account *and* per device row. */}
+          <E2eeProvider>
+            <View style={styles.root}>
+              <Shell />
+            </View>
+          </E2eeProvider>
+        </SessionProvider>
+      </SafeAreaProvider>
+    </ErrorBoundary>
   );
 }
 

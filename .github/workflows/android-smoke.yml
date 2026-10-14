@@ -4,13 +4,19 @@
 # what happened — the first published APK crashed the moment it opened on a real phone, and nothing in
 # the pipeline could see it, because "the build succeeded" and "the app runs" are different claims.
 #
-# So a real Android system image boots here, the freshly built APK is installed, launched, and the
-# crash log is the evidence: the job fails if the process is gone or if a fatal exception appears, and
-# it prints the exception block either way.
+# So a real Android system image boots here, the freshly built APK is installed, launched, and the crash
+# log is the evidence: the job fails if the process is gone or if a fatal exception appears, and the
+# report is published as a GitHub issue — step logs and artifacts are served from hosts that some
+# networks (including the one this project is developed from) cannot reach, and a report nobody can
+# read is not a report.
 #
-# This is also the closest thing to a device that CI can provide. What it cannot cover (a specific
-# phone model, camera, microphone, a real cellular network) stays listed as untested in
-# docs/feature-log.md rather than being implied.
+# Two failures shaped the current shape, and both are worth keeping in mind when editing this file:
+#   - the emulator needs KVM group permissions enabled first, or it never starts;
+#   - the emulator action runs its `script` input **one line per shell**, so anything multi-line must
+#     live in `.github/scripts/android-launch-capture.sh` and be invoked as a single line.
+#
+# What an emulator cannot cover (a specific phone model, the camera, the microphone, a real cellular
+# network) stays listed as untested in docs/feature-log.md rather than being implied.
 name: Android smoke test
 
 on:
@@ -19,6 +25,7 @@ on:
     branches: ['**']
     paths:
       - 'apps/mobile/**'
+      - '.github/scripts/**'
       - '.github/workflows/android-smoke.yml'
   # Run after any APK build, so a crash is reported on the same commit that introduced it.
   workflow_run:
@@ -49,7 +56,7 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: 17
 
       - name: Install dependencies
         run: npm ci
@@ -57,8 +64,6 @@ jobs:
       - name: Build shared package
         run: npm run build -w @sovereign/shared
 
-      # The same build the user installs: if the smoke test used a debug build it would prove nothing,
-      # because the crash only happens in the release/optimised pipeline.
       - name: Generate the native project and build the release APK
         working-directory: apps/mobile
         env:
@@ -72,9 +77,16 @@ jobs:
           chmod +x gradlew
           ./gradlew --no-daemon :app:assembleRelease
 
+      # The harness that decides "did it open?" is code too, and it reported a bare exit code with no
+      # logs the first time it was used. It is checked and tested before it is trusted with the run.
+      - name: Check the capture harness
+        run: |
+          sh -n .github/scripts/android-launch-capture.sh
+          sh .github/scripts/test-launch-capture.sh
+
       # Hardware acceleration must be switched on explicitly; without it the emulator cannot start and
-      # the action aborts with a bare exit code. (First attempt failed exactly this way, which is why
-      # the step below is here rather than assumed.)
+      # the action aborts with a bare exit code. (The first attempt failed exactly this way, which is
+      # why this step is here rather than assumed.)
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -92,79 +104,22 @@ jobs:
           emulator-boot-timeout: 900
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
-          # Every command is allowed to fail so that the diagnostics still get written: a missing log is
-          # what made the first failure unreadable.
-          script: |
-            set -x
-            echo "device state:" > diagnostics.txt
-            adb devices -l >> diagnostics.txt 2>&1
-            APK=$(find apps/mobile/android/app/build/outputs/apk/release -name '*.apk' | head -n 1)
-            echo "apk: $APK" >> diagnostics.txt
-            ls -lh "$APK" >> diagnostics.txt 2>&1
-            adb install -r "$APK" >> diagnostics.txt 2>&1
-            adb logcat -c || true
-            adb shell am start -W -n app.sovereign.client/.MainActivity > start.txt 2>&1 || true
-            cat start.txt >> diagnostics.txt
-            # Give the JS bundle time to load on a cold emulator, then read what the system recorded.
-            sleep 45
-            adb shell pidof app.sovereign.client > pid.txt 2>&1 || true
-            adb shell dumpsys activity activities > activities.txt 2>&1 || true
-            adb logcat -d > logcat.txt 2>&1 || true
-            adb logcat -d -b crash > crash.txt 2>&1 || true
-            echo "=== diagnostics ==="
-            cat diagnostics.txt || true
-            echo "=== fatal exceptions ==="
-            grep -B 5 -A 60 -E "FATAL EXCEPTION" logcat.txt crash.txt 2>/dev/null | head -n 200 || echo none
+          # One line on purpose: the action splits this input into individual lines and runs each in its
+          # own shell, so shell state does not survive between them.
+          script: sh .github/scripts/android-launch-capture.sh
 
-      - name: Report the outcome
+      - name: Summarise the launch
+        if: always()
         run: |
-          echo "### Android launch check" >> "$GITHUB_STEP_SUMMARY"
-          PID=$(cat pid.txt 2>/dev/null | tr -d '\r')
-          if [ -n "$PID" ]; then
-            echo "The app is running (pid $PID)." >> "$GITHUB_STEP_SUMMARY"
-            ALIVE=1
-          else
-            echo "**The app is not running after launch.**" >> "$GITHUB_STEP_SUMMARY"
-            ALIVE=0
-          fi
+          {
+            echo "### Android launch check — \`${GITHUB_SHA::7}\`"
+            echo
+            echo '```'
+            cat launch-logs/verdict.txt 2>/dev/null || echo "the capture script produced no verdict"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
-          RESUMED=$(grep -E "mResumedActivity|ResumedActivity|topResumedActivity" activities.txt | head -n 3 || true)
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Foreground activity:" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          echo "$RESUMED" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Fatal exceptions found in logcat:" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          grep -A 40 -E "FATAL EXCEPTION|AndroidRuntime.*(FATAL|E )" logcat.txt crash.txt 2>/dev/null | head -n 120 >> "$GITHUB_STEP_SUMMARY" || echo "none" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "App-tagged log lines:" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          grep -E "sovereign|ReactNative|Hermes|expo" logcat.txt | head -n 60 >> "$GITHUB_STEP_SUMMARY" || true
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-
-          # Also print to the job log, because that is what a person reads first.
-          echo "=== fatal exceptions ==="
-          grep -B 5 -A 60 -E "FATAL EXCEPTION" logcat.txt crash.txt 2>/dev/null | head -n 200 || echo "none"
-          echo "=== app lines ==="
-          grep -E "sovereign|ReactNativeJS|Hermes" logcat.txt | head -n 80 || true
-
-          if [ "$ALIVE" != "1" ]; then
-            echo "::error::the APK did not stay running on the emulator"
-            exit 1
-          fi
-          if grep -q "FATAL EXCEPTION" logcat.txt crash.txt 2>/dev/null; then
-            echo "::error::the APK crashed at launch (see the exception above)"
-            exit 1
-          fi
-
-      # The failure report is also written into an issue, because step logs and artifacts are served
-      # from hosts that some networks (including the one this project is developed from) cannot reach.
-      # An issue is readable from anywhere, which is the point of a report.
+      # The report also goes into an issue: it is the one place that is readable from everywhere.
       - name: Publish the launch report
         if: always()
         env:
@@ -174,28 +129,25 @@ jobs:
             echo "### Android launch check — \`${GITHUB_SHA::7}\`"
             echo
             echo "- Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-            echo "- App process: $(cat pid.txt 2>/dev/null | tr -d '\r' | sed 's/^$/none (not running)/')"
             echo
-            echo "<details><summary>start output</summary>"
-            echo
-            echo '```'
-            head -c 2000 start.txt 2>/dev/null || echo "no start output"
-            echo '```'
-            echo "</details>"
-            echo
-            echo "<details><summary>fatal exceptions</summary>"
-            echo
-            echo '```'
-            grep -B 5 -A 60 "FATAL EXCEPTION" logcat.txt crash.txt 2>/dev/null | head -c 8000 || echo none
-            echo '```'
-            echo "</details>"
-            echo
-            echo "<details><summary>app log lines</summary>"
-            echo
-            echo '```'
-            grep -E "sovereign|ReactNativeJS|Hermes|expo" logcat.txt 2>/dev/null | head -c 6000 || echo none
-            echo '```'
-            echo "</details>"
+            if [ -d launch-logs ]; then
+              for file in verdict.txt apk.txt devices.txt boot.txt install.txt start.txt pid.txt \
+                activities.txt crash.txt dropbox.txt logcat.txt clear.txt package.txt screen.txt; do
+                [ -f "launch-logs/$file" ] || continue
+                echo "<details><summary>$file</summary>"
+                echo
+                echo '```'
+                # Enough to carry a stack trace, small enough to stay readable in an issue.
+                head -c 6000 "launch-logs/$file"
+                echo
+                echo '```'
+                echo "</details>"
+                echo
+              done
+            else
+              echo "The capture produced no files at all, so the step failed before it started a device."
+              echo "The emulator action's own error is in the job log."
+            fi
           } > report.md
 
           ISSUE=$(gh issue list --repo "$GITHUB_REPOSITORY" --search 'Android launch report in:title' --state open --json number -q '.[0].number' 2>/dev/null || echo "")
@@ -212,12 +164,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: android-launch-logs
-          path: |
-            logcat.txt
-            crash.txt
-            activities.txt
-            pid.txt
-            start.txt
-            diagnostics.txt
+          path: launch-logs/
           if-no-files-found: warn
           retention-days: 30
