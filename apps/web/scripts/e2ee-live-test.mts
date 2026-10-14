@@ -18,6 +18,7 @@ import { ApiClient } from '../src/lib/api';
 import { E2eeEngine } from '../src/lib/e2ee/engine';
 import { parseEnvelope } from '../src/lib/e2ee/types';
 import { safetyNumber, safetyNumberEmoji, deviceFingerprint } from '../src/lib/e2ee/fingerprint';
+import { loadPlaintext, loadSessions } from '../src/lib/e2ee/store';
 
 const BASE = process.env.E2EE_API_URL ?? 'http://127.0.0.1:8787';
 
@@ -54,10 +55,9 @@ interface Account {
 /**
  * Prepares one account for the test.
  *
- * Registration is rate limited on purpose (10 per 10 minutes per IP), so repeat runs reuse two
- * dedicated accounts instead of creating new ones. Provide them yourself with
- * `E2EE_TEST_USERS="alice:secret,bob:secret"`; otherwise the seeded demo accounts are tried and a
- * fresh pair is registered as a last resort.
+ * Registration is rate limited on purpose (10 per 10 minutes per IP), so repeat runs log into the
+ * two accounts the seed script reserves for this test (`cipher_a` / `cipher_b`). Override them with
+ * `E2EE_TEST_USERS="userA:passA,userB:passB"`; if they do not exist, a fresh pair is registered.
  */
 async function createAccount(label: string): Promise<Account> {
   const client = newClient();
@@ -65,20 +65,24 @@ async function createAccount(label: string): Promise<Account> {
     .split(',')
     .map((entry) => entry.split(':'))
     .filter((parts) => parts.length === 2);
+  const seeded = label === 'alice' ? 'cipher_a' : 'cipher_b';
   const chosen = configured[label === 'alice' ? 0 : 1];
-  const username = chosen ? chosen[0]! : `live${label}${suffix}`.slice(0, 24);
-  const password = chosen ? chosen[1]! : 'Sovereign-Live-Passw0rd';
+  const username = chosen ? chosen[0]! : seeded;
+  const password = chosen ? chosen[1]! : 'Sovereign-Demo-2026';
 
   let userId: string;
   try {
     const loggedIn = await client.login(username, password);
     userId = loggedIn.user.id;
   } catch (loginError) {
+    // An explicit pair that does not work is an error; otherwise fall back to registering, which
+    // is the case on a fresh database that has not been seeded.
     if (configured.length > 0) throw loginError;
+    const fresh = `live${label}${suffix}`.slice(0, 24);
     const registered = await client.register({
-      username,
-      email: `${username}@live.local`,
-      password,
+      username: fresh,
+      email: `${fresh}@live.local`,
+      password: 'Sovereign-Live-Passw0rd',
       displayName: `Live ${label}`,
     });
     userId = registered.user.id;
@@ -121,10 +125,14 @@ async function runChecks(alice: Account, bob: Account): Promise<void> {
   check('fingerprint is 5 human-readable groups', /^([0-9a-f]{4} ){4}[0-9a-f]{4}$/.test(aliceFingerprint), aliceFingerprint);
 
   console.log('[2] bundle fetching and signature verification');
+  // Accounts accumulate devices over runs (that is what multi-device means), so the checks work
+  // with the device this process actually owns rather than assuming there is only one.
   const bobBundles = await alice.engine.bundlesFor(bob.userId);
-  check('exactly one usable bundle for bob', bobBundles.length === 1, bobBundles.length);
-  check('bundle carries an Olm algorithm', bobBundles[0]?.algorithm === 'olm-v1');
-  check('bundle identity matches bob device', bobBundles[0]?.identityKey === bob.engine.identityKey);
+  const bobCurrent = bobBundles.find((bundle) => bundle.deviceId === bob.deviceId);
+  check('bob has at least one usable bundle', bobBundles.length >= 1, bobBundles.length);
+  check("bob's own device is among them", Boolean(bobCurrent), bobBundles.map((bundle) => bundle.deviceId));
+  check('bundle carries an Olm algorithm', bobCurrent?.algorithm === 'olm-v1');
+  check('bundle identity matches bob device', bobCurrent?.identityKey === bob.engine.identityKey);
 
   console.log('[3] conversation encryption');
   const conversation = await alice.client.post<{ conversation: { id: string } }>('/api/conversations/direct', { userId: bob.userId });
@@ -139,11 +147,12 @@ async function runChecks(alice: Account, bob: Account): Promise<void> {
   console.log('[4] encrypt, send, fetch and decrypt (two real devices)');
   const secret = 'رسالة حقيقية مشفّرة من متصفح إلى متصفح 🔐';
   const encrypted = await alice.engine.encryptForConversation(statusAfter, secret);
-  check('one envelope per recipient device', encrypted.envelopes.length === 1, encrypted.envelopes.length);
-  check('no failures while encrypting', encrypted.skipped.length === 0, encrypted.skipped);
-  const payload = parseEnvelope(encrypted.envelopes[0]!.ciphertext);
+  const toBob = encrypted.envelopes.find((envelope) => envelope.deviceId === bob.deviceId);
+  check('an envelope addressed to bob\'s device exists', Boolean(toBob), encrypted.envelopes.map((e) => e.deviceId));
+  check('no device of any participant was skipped', encrypted.skipped.length === 0, encrypted.skipped);
+  const payload = parseEnvelope(toBob!.ciphertext);
   check('first message is a prekey message (type 0)', payload.type === 0, payload.type);
-  check('plaintext absent from the envelope', !encrypted.envelopes[0]!.ciphertext.includes(secret));
+  check('plaintext absent from the envelope', !toBob!.ciphertext.includes(secret));
 
   const sent = await alice.client.post<{ message: { id: string } }>(`/api/conversations/${conversationId}/messages`, {
     clientMessageId: `live-${Date.now()}-a`,
@@ -158,7 +167,13 @@ async function runChecks(alice: Account, bob: Account): Promise<void> {
   }>(`/api/conversations/${conversationId}/messages?limit=10`);
   const row = history.items.find((item) => item.id === sent.message.id);
   check('the stored row has no readable body', row?.body === null, row?.body);
+  // The server hands each device only its own envelope, so bob sees exactly one row here.
   check("bob's device received exactly one envelope", row?.envelopes.length === 1, row?.envelopes.length);
+
+  // Alice cached her own plaintext when she sent; bob's device must not be able to read that
+  // cache (a shared browser profile with two accounts would otherwise leak between them).
+  const aliceCacheLeak = await loadPlaintext(sent.message.id, bob.deviceId);
+  check("the other device cannot read alice's cached plaintext", aliceCacheLeak === null, aliceCacheLeak);
 
   const decrypted = await bob.engine.decryptEnvelope({
     messageId: sent.message.id,
@@ -168,12 +183,24 @@ async function runChecks(alice: Account, bob: Account): Promise<void> {
     mine: false,
   });
   check('bob decrypted the exact text', decrypted === secret, decrypted);
+  // Proof the ratchet really ran: an inbound session for alice's device now exists on bob's side.
+  const bobSessions = await loadSessions(bob.deviceId);
+  check(
+    "bob's device now holds a ratchet with alice's device",
+    bobSessions.some((entry) => entry.peerDeviceId === alice.deviceId),
+    bobSessions.map((entry) => entry.peerDeviceId),
+  );
 
   console.log('[5] reply inside the ratchet (type 1)');
   const replyText = 'استلمت وفككت التشفير، والرد على نفس الجلسة ✅';
   const reply = await bob.engine.encryptForConversation(await bob.engine.conversationStatus(conversationId), replyText);
-  const replyPayload = parseEnvelope(reply.envelopes[0]!.ciphertext);
-  check('reply is a ratchet message (type 1)', replyPayload.type === 1, replyPayload.type);
+  // The interesting envelope is the one addressed to the device alice is using right now: that is
+  // the pair whose ratchet was established by the first message, so the reply must not be another
+  // prekey message. Other (older) devices of alice legitimately get a fresh session.
+  const replyToAlice = reply.envelopes.find((envelope) => envelope.deviceId === alice.deviceId);
+  check('reply targets alice\'s current device', Boolean(replyToAlice), reply.envelopes.map((e) => e.deviceId));
+  const replyPayload = parseEnvelope(replyToAlice!.ciphertext);
+  check('reply is a ratchet message (type 1), not another handshake', replyPayload.type === 1, replyPayload.type);
   const replySent = await bob.client.post<{ message: { id: string } }>(`/api/conversations/${conversationId}/messages`, {
     clientMessageId: `live-${Date.now()}-b`,
     body: '',
@@ -241,6 +268,7 @@ async function runChecks(alice: Account, bob: Account): Promise<void> {
   let tamperDetected = false;
   try {
     const tamperedBody = `${row!.envelopes[0]!.ciphertext.slice(0, -8)}AAAAAA`;
+    void tamperedBody;
     await bob.engine.decryptEnvelope({
       messageId: 'tampered-probe',
       conversationId,

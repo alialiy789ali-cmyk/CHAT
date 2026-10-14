@@ -287,10 +287,14 @@ export class OlmDevice {
    *
    * The prekey (type 0) case creates the inbound session from the sender's identity key, which the
    * caller must have verified; later messages (type 1) are applied to the stored ratchet.
+   *
+   * `peerDeviceId` is the *sender's* device — note that `envelope.deviceId` is this device, since
+   * that is who the ciphertext was addressed to. Keying the session by the envelope's device would
+   * file it under our own id and make every reply look like a brand-new conversation (type 0).
    */
-  async decryptFrom(peerIdentityKey: string, envelope: MessageEnvelope): Promise<string> {
+  async decryptFrom(peerIdentityKey: string, peerDeviceId: string, envelope: MessageEnvelope): Promise<string> {
     const parsed = JSON.parse(envelope.ciphertext) as { type: number; body: string };
-    const existing = await this.restoreSession(envelope.deviceId);
+    const existing = await this.restoreSession(peerDeviceId);
     if (existing) {
       try {
         const plaintext = existing.decrypt(parsed.type, parsed.body);
@@ -301,14 +305,14 @@ export class OlmDevice {
         // after the first one) is legitimate; anything else must surface to the user.
         if (parsed.type !== 0) throw error;
         existing.free();
-        await deleteSession(sessionKey(this.deviceId, envelope.deviceId));
+        await deleteSession(sessionKey(this.deviceId, peerDeviceId));
       }
     }
     const session = new this.olm.Session();
     session.create_inbound_from(this.account, peerIdentityKey, parsed.body);
     const plaintext = session.decrypt(parsed.type, parsed.body);
     this.account.remove_one_time_keys(session);
-    await this.persistSession(session, envelope.deviceId);
+    await this.persistSession(session, peerDeviceId);
     await this.remember(true);
     return plaintext;
   }

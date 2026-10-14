@@ -65,8 +65,9 @@ export function useDecryption(
         }
         if (plaintext.has(row.id)) continue;
 
-        // The cache is the first stop: it survives reloads and works offline.
-        const cached = await loadPlaintext(row.id);
+        // The cache is the first stop: it survives reloads and works offline. It is scoped to
+        // this device, so another account in the same browser cannot read text it never held.
+        const cached = await loadPlaintext(row.id, engine.deviceId);
         if (cached) {
           plaintext.set(row.id, cached.body);
           lockState.set(row.id, 'decrypted');

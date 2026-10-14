@@ -208,18 +208,20 @@ export class E2eeEngine {
     envelope: MessageEnvelope;
     mine: boolean;
   }): Promise<string> {
-    const cached = await loadPlaintext(input.messageId);
+    const cached = await loadPlaintext(input.messageId, this.deviceId);
     if (cached) return cached.body;
 
     const payload = parseEnvelope(input.envelope.ciphertext);
     if (!payload.senderIdentityKey) throw new Error('envelope_missing_sender_key');
 
     // Bind the claimed sender key to the sender's published devices before starting a session.
+    // The matching bundle also tells us *which* of their devices wrote it, which is how the
+    // ratchet is filed locally (one session per device pair).
     const bundles = await this.bundlesFor(input.senderUserId).catch(() => [] as E2eeDeviceBundle[]);
-    const known = bundles.some((bundle) => bundle.identityKey === payload.senderIdentityKey);
-    if (!known) throw new Error('envelope_sender_key_untrusted');
+    const senderDevice = bundles.find((bundle) => bundle.identityKey === payload.senderIdentityKey);
+    if (!senderDevice) throw new Error('envelope_sender_key_untrusted');
 
-    const plaintext = await this.device.decryptFrom(payload.senderIdentityKey, input.envelope);
+    const plaintext = await this.device.decryptFrom(payload.senderIdentityKey, senderDevice.deviceId, input.envelope);
     const record: CachedPlaintext = {
       messageId: input.messageId,
       conversationId: input.conversationId,

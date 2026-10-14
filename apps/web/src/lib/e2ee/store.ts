@@ -214,13 +214,22 @@ export async function cachePlaintext(entry: CachedPlaintext): Promise<void> {
   await transaction(STORE_PLAINTEXT, 'readwrite', (store) => store.put(entry));
 }
 
-export async function loadPlaintext(messageId: string): Promise<CachedPlaintext | null> {
-  return (await transaction<CachedPlaintext | undefined>(STORE_PLAINTEXT, 'readonly', (store) => store.get(messageId))) ?? null;
+/**
+ * Looks up cached plaintext **for one device**.
+ *
+ * The device check is not cosmetic: a browser profile can be used by more than one account, and
+ * the messages of an encrypted conversation the other account took part in are already on disk.
+ * Returning them for the wrong device would hand one account text it never decrypted.
+ */
+export async function loadPlaintext(messageId: string, deviceId: string): Promise<CachedPlaintext | null> {
+  const entry = await transaction<CachedPlaintext | undefined>(STORE_PLAINTEXT, 'readonly', (store) => store.get(messageId));
+  if (!entry || entry.deviceId !== deviceId) return null;
+  return entry;
 }
 
-export async function loadPlaintextForConversation(conversationId: string): Promise<CachedPlaintext[]> {
+export async function loadPlaintextForConversation(conversationId: string, deviceId: string): Promise<CachedPlaintext[]> {
   const all = await transaction<CachedPlaintext[]>(STORE_PLAINTEXT, 'readonly', (store) => store.getAll());
-  return all.filter((entry) => entry.conversationId === conversationId);
+  return all.filter((entry) => entry.conversationId === conversationId && entry.deviceId === deviceId);
 }
 
 export async function clearPlaintextCache(): Promise<void> {

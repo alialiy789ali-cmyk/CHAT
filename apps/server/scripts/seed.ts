@@ -63,6 +63,21 @@ async function main(): Promise<void> {
     bio: 'مشرفة المجتمع.',
     role: 'moderator',
   });
+  // Two accounts reserved for the encryption test (`npm run test:e2ee -w @sovereign/web`).
+  // They exist so that repeatable verification does not depend on the registration rate limit;
+  // the test logs them out when it finishes, so they never hold a session open.
+  const e2eeA = await ensureUser({
+    username: 'cipher_a',
+    email: 'cipher-a@demo.local',
+    displayName: 'مستخدم الاختبار أ',
+    bio: 'حساب مخصّص لاختبار التشفير الطرفي.',
+  });
+  const e2eeB = await ensureUser({
+    username: 'cipher_b',
+    email: 'cipher-b@demo.local',
+    displayName: 'مستخدم الاختبار ب',
+    bio: 'حساب مخصّص لاختبار التشفير الطرفي.',
+  });
 
   // ---------------------------------------------------------------- social graph
   await deps.repos.social.follow(bob.id, alice.id);
@@ -174,7 +189,7 @@ async function main(): Promise<void> {
 
   logger.info('seed complete');
   console.log('\nDemo accounts (development only):');
-  for (const user of [alice, bob, moderator]) {
+  for (const user of [alice, bob, moderator, e2eeA, e2eeB]) {
     console.log(`  ${user.username.padEnd(10)} ${user.email.padEnd(22)} password: ${DEMO_PASSWORD}`);
   }
   console.log('\nSuggested walkthrough:');
