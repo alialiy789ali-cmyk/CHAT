@@ -1634,4 +1634,63 @@ describe('acceptance criteria', () => {
     // The bytes come back exactly as they were uploaded — the server never re-encodes them.
     expect(bobDownload.bytes.equals(secretBytes)).toBe(true);
   });
+  it('28. removing a device deletes its keys without locking that install out', async () => {
+    const base = e2e().baseUrl;
+    const alice = new ApiClient(base);
+    const installKey = `install-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    await alice.register({ username: uniqueUsername('removal'), deviceKey: installKey });
+    const deviceId = alice.deviceId!;
+    const device = new SignalDevice(alice.username!, 1);
+    const firstBundle = await device.bundleBody();
+    const oldIdentityKey = firstBundle.identityKey;
+    await alice.request('PUT', '/api/keys/identity', { body: firstBundle });
+
+    const before = await alice.request<{ devices: Array<{ deviceId: string }> }>('GET', `/api/keys/${alice.userId}/devices`);
+    expect(before.body.devices.map((entry) => entry.deviceId)).toContain(deviceId);
+
+    // "Sign out and remove this device" — the security centre's own call.
+    const removed = await alice.request<{ revoked: boolean }>('DELETE', `/api/users/me/devices/${deviceId}`);
+    expect(removed.status).toBe(200);
+    expect(removed.body.revoked).toBe(true);
+
+    // The keys go with it: no peer will address that device any more, and its token is dead.
+    const after = await alice.request<{ devices: Array<{ deviceId: string }> }>('GET', `/api/keys/${alice.userId}/devices`);
+    expect(after.body.devices.map((entry) => entry.deviceId)).not.toContain(deviceId);
+
+    /**
+     * The removed device's token stops working — after the session cache window.
+     *
+     * Session liveness is answered from a 10-second cache so that ordinary requests do not each cost
+     * a database round trip; the trade-off is that a revocation takes effect within that window
+     * rather than instantly. The test states the window instead of pretending it is zero.
+     */
+    const staleClient = new ApiClient(base);
+    const withinWindow = await staleClient.request('GET', '/api/users/me', { token: alice.accessToken });
+    expect(withinWindow.status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 11_000));
+    const staleToken = await staleClient.request('GET', '/api/users/me', { token: alice.accessToken });
+    expect(staleToken.status).toBe(401);
+
+    // Signing in again from that install must work — and must reuse the row, not collide with the
+    // unique install key. This is the case that used to fail with an internal error (a removed phone
+    // could never sign in again).
+    const again = new ApiClient(base);
+    const login = await again.login(alice.username!, PASSWORD, { key: installKey, name: 'Same phone' });
+    expect(login.deviceId).toBe(deviceId);
+    const me = await again.request<{ id: string }>('GET', '/api/users/me');
+    expect(me.status).toBe(200);
+
+    // The device comes back empty: its keys were deleted, so the client republishes a new identity.
+    const empty = await again.request<{ devices: unknown[] }>('GET', `/api/keys/${again.userId}/devices`);
+    expect(empty.body.devices).toEqual([]);
+    const republished = new SignalDevice(again.username!, 1);
+    await again.request('PUT', '/api/keys/identity', { body: await republished.bundleBody() });
+    const restored = await again.request<{ devices: Array<{ deviceId: string; identityKey: string }> }>(
+      'GET',
+      `/api/keys/${again.userId}/devices`,
+    );
+    expect(restored.body.devices).toHaveLength(1);
+    // A new identity, not the resurrected old one: the keys were really deleted.
+    expect(restored.body.devices[0]!.identityKey).not.toBe(oldIdentityKey);
+  });
 });

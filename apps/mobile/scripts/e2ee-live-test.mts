@@ -112,6 +112,31 @@ async function phoneAccount(username: string, installKey = `mobile-live-${userna
   return { token: loggedIn.body.accessToken, userId: loggedIn.body.user.id, deviceId: loggedIn.body.deviceId, username };
 }
 
+
+/**
+ * Removes devices this account no longer uses, before the run starts.
+ *
+ * The live test signs in to fixed accounts so repeated runs do not pile up identities — but that also
+ * means a device created by an *earlier* run is still in the account, and every device that has
+ * published keys is addressed by every send. The assertions below ("exactly one envelope", "the
+ * second device gets its own envelope") describe a clean device set, so the run begins by making one:
+ * sign in, then drop every other device of the account through the same endpoint the security centre
+ * uses (`DELETE /users/me/devices/:id`).
+ *
+ * The keys of a removed device are deleted with it — asserted explicitly at the end of the run, since
+ * that is what makes a lost phone stop receiving ciphertext.
+ */
+async function dropOtherDevices(account: Account): Promise<string[]> {
+  const devices = await call<Array<{ id: string }>>('GET', '/api/users/me/devices', { token: account.token });
+  const removed: string[] = [];
+  for (const device of devices.body) {
+    if (device.id === account.deviceId) continue;
+    await call('DELETE', `/api/users/me/devices/${device.id}`, { token: account.token });
+    removed.push(device.id);
+  }
+  return removed;
+}
+
 /** The app's `E2eeTransport`, backed by fetch. */
 function transportFor(token: string): E2eeTransport {
   return {
@@ -138,6 +163,9 @@ async function main(): Promise<void> {
   const bobName = `${PREFIX}_b`;
   const alice = await phoneAccount(aliceName);
   const bob = await phoneAccount(bobName);
+  // Housekeeping first: leftovers from earlier runs would otherwise be addressed by every send.
+  const staleLeftovers = (await dropOtherDevices(alice)).length + (await dropOtherDevices(bob)).length;
+  if (staleLeftovers > 0) console.log(`  · removed ${staleLeftovers} leftover device(s) from earlier runs`);
   check('two accounts register and each gets its own device row', alice.deviceId !== bob.deviceId && alice.userId !== bob.userId);
 
   const aliceEngine = await makeEngine(alice);
@@ -401,6 +429,20 @@ async function main(): Promise<void> {
   const emojisA = await aliceEngine.safetyEmojiWith(bobIdentity);
   const emojisB = await bobEngine.safetyEmojiWith(aliceIdentity);
   check('the emoji comparison agrees', emojisA.join('') === emojisB.join('') && emojisA.length === 7, { emojisA, emojisB });
+
+  // A device that is gone must stop being addressable, and its keys must go with it: this is what
+  // makes "sign out and remove this phone" a real answer to a lost device.
+  await call('DELETE', `/api/users/me/devices/${aliceTablet.deviceId}`, { token: alice.token });
+  const directoryAfterRemoval = await call<{ devices: Array<{ deviceId: string }> }>(
+    'GET',
+    `/api/keys/${alice.userId}/devices`,
+    { token: bob.token },
+  );
+  check(
+    'removing a device deletes the keys it published',
+    !directoryAfterRemoval.body.devices.some((device) => device.deviceId === aliceTablet.deviceId),
+    directoryAfterRemoval.body.devices,
+  );
 
   // ---------------------------------------------------------------- summary
   console.log(`\n${failures.length === 0 ? 'PASS' : 'FAIL'} — ${passed} checks passed, ${failures.length} failed`);

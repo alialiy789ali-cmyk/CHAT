@@ -57,11 +57,34 @@ export class SessionsRepo {
    * Finds the user's own device row for an install. Scoped to `userId` on purpose: an install key
    * is not a credential, so it must never be able to point at somebody else's device.
    */
-  findDeviceByInstallKey(userId: string, installKey: string): Promise<DeviceRow | null> {
+  findDeviceByInstallKey(userId: string, installKey: string, options: { includeRevoked?: boolean } = {}): Promise<DeviceRow | null> {
     return this.db.one<DeviceRow>(
       `select id, user_id, name, platform, install_key, push_token, last_seen_at, created_at, revoked_at
-       from devices where user_id = $1 and install_key = $2 and revoked_at is null`,
+       from devices
+        where user_id = $1 and install_key = $2 ${options.includeRevoked ? '' : 'and revoked_at is null'}`,
       [userId, installKey],
+    );
+  }
+
+  /**
+   * Brings a revoked device back into service for the install that owns it.
+   *
+   * Removing a device deletes its keys and revokes its sessions, but the *install key* stays on the
+   * row — so without this, signing in again from that install collides with the unique
+   * `(user_id, install_key)` index and fails with an internal error: removing an old phone would
+   * permanently lock that phone out. Reviving keeps one row per install (the alternative, clearing
+   * the key and inserting a new row, would leave two rows claiming to be the same install).
+   *
+   * The device comes back *empty*: its keys were deleted and its sessions revoked, so the next
+   * client start publishes fresh keys with a new identity rather than resurrecting the old one.
+   */
+  async reviveDevice(deviceId: string, name: string): Promise<DeviceRow> {
+    return this.db.oneOrFail<DeviceRow>(
+      `update devices set revoked_at = null, name = $2, last_seen_at = now()
+        where id = $1
+        returning id, user_id, name, platform, install_key, push_token, last_seen_at, created_at, revoked_at`,
+      [deviceId, name],
+      'storage_error',
     );
   }
 
@@ -99,12 +122,23 @@ export class SessionsRepo {
     );
   }
 
-  async revokeDevice(userId: string, deviceId: string): Promise<number> {
+  /**
+   * Removes a device: keys deleted, sessions revoked, row marked revoked.
+   *
+   * All three belong together. Keeping the sessions alive would mean "remove this device" leaves the
+   * device signed in — the exact opposite of what the button promises — and keeping the keys would
+   * let peers keep addressing a device that no longer exists.
+   *
+   * The row itself stays (and so does its install key), because the install may sign in again: see
+   * `reviveDevice`, which is what stops a removed phone from being locked out forever.
+   */
+  async revokeDevice(userId: string, deviceId: string, reason = 'device_removed'): Promise<number> {
     const res = await this.db.query(
       'update devices set revoked_at = now() where id = $1 and user_id = $2 and revoked_at is null',
       [deviceId, userId],
     );
     await this.db.query('delete from device_keys where device_id = $1', [deviceId]);
+    await this.revokeDeviceSessions(userId, deviceId, reason);
     return res.rowCount ?? 0;
   }
 

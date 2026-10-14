@@ -20,6 +20,13 @@ import { loadOlm } from '../src/lib/e2ee/client';
 import { parseEnvelope } from '../src/lib/e2ee/types';
 import { safetyNumber, safetyNumberEmoji, deviceFingerprint } from '../src/lib/e2ee/fingerprint';
 import { loadPlaintext, loadSessions } from '../src/lib/e2ee/store';
+import {
+  encodeContent,
+  openAsBlob,
+  openBytes,
+  parseContent,
+  sealFileForUpload,
+} from '../src/lib/e2ee/content';
 
 const BASE = process.env.E2EE_API_URL ?? 'http://127.0.0.1:8787';
 
@@ -116,6 +123,24 @@ async function createAccount(label: string): Promise<Account> {
   return { client, engine, userId, deviceId, username };
 }
 
+/**
+ * Drops devices of this account that earlier runs left behind.
+ *
+ * The live test signs in to fixed accounts (registration is rate limited), so a device created by a
+ * previous run is still part of the account — and every device with published keys is addressed by
+ * every send, which turns assertions about envelope counts into a function of run history. Doing
+ * housekeeping first makes each run describe the state it actually wants to test, exactly as CI's
+ * fresh database does. This is the security centre's own endpoint, and it deletes the device's keys
+ * with it.
+ */
+async function dropOtherDevices(client: ApiClient, deviceId: string): Promise<void> {
+  const devices = await client.get<Array<{ id: string }>>('/api/users/me/devices');
+  for (const device of devices) {
+    if (device.id === deviceId) continue;
+    await client.request(`/api/users/me/devices/${device.id}`, { method: 'DELETE' }).catch(() => {});
+  }
+}
+
 async function main(): Promise<void> {
   console.log(`Sovereign web E2EE live test against ${BASE}\n`);
 
@@ -125,6 +150,9 @@ async function main(): Promise<void> {
   try {
     alice = await createAccount('alice');
     bob = await createAccount('bob');
+    // Before anything is asserted about devices, make the account's device set match this run.
+    await dropOtherDevices(alice.client, alice.deviceId);
+    await dropOtherDevices(bob.client, bob.deviceId);
     await runChecks(alice, bob);
   } finally {
     // Sessions are capped per account: leaving them behind would lock an account out after a few
@@ -430,6 +458,126 @@ async function runChecks(alice: Account, bob: Account): Promise<void> {
   // …while the sending device never needed an envelope for itself: its own plaintext is local.
   const firstCache = await loadPlaintext(selfSent.message.id, alice.deviceId);
   check('the sending device kept its own plaintext locally', firstCache?.body === selfSecret, firstCache?.body);
+
+  console.log('[12] encrypted attachments (bytes the server cannot read)');
+  // The file is sealed in the client before upload, and the key that opens it travels inside the
+  // encrypted message — never in the upload. Everything below is the real browser module doing it.
+  const fileBytes = new TextEncoder().encode('خطة سرّية: لا يقرأها الخادم، ولا تُخزَّن إلا مشفّرة.\n'.repeat(8));
+  const sealed = await sealFileForUpload(new Blob([fileBytes]), 'secret-plan.txt', 'text/plain');
+  const uploaded = await alice.client.upload<{
+    attachment: { id: string; fileName: string; mimeType: string; sizeBytes: number; isEncrypted: boolean };
+  }>('/api/files', sealed.form);
+  check('the upload is stored as ciphertext', uploaded.attachment.isEncrypted === true, uploaded.attachment);
+  check(
+    'the server kept a neutral name and type',
+    uploaded.attachment.fileName === 'encrypted.bin' && uploaded.attachment.mimeType === 'application/octet-stream',
+    uploaded.attachment,
+  );
+  check(
+    'the stored size is the ciphertext size, not the plaintext size',
+    uploaded.attachment.sizeBytes > fileBytes.byteLength,
+    { stored: uploaded.attachment.sizeBytes, plaintext: fileBytes.byteLength },
+  );
+
+  const descriptor = sealed.describe(uploaded.attachment.id);
+  const contentPayload = encodeContent('مرفق مشفّر داخل رسالة مشفّرة 🔐', [descriptor]);
+  const withFile = await alice.engine.encryptForConversation(
+    await alice.engine.conversationStatus(conversationId),
+    contentPayload,
+  );
+  const fileSent = await alice.client.post<{ message: { id: string } }>(
+    `/api/conversations/${conversationId}/messages`,
+    {
+      clientMessageId: `live-${Date.now()}-file`,
+      body: '',
+      encryptionScheme: 'olm-v1',
+      envelopes: withFile.envelopes,
+      attachmentIds: [uploaded.attachment.id],
+    },
+  );
+  await alice.engine.rememberSent({ messageId: fileSent.message.id, conversationId, body: contentPayload });
+
+  // The row the server holds says nothing about the file: no name, no type, no key.
+  const storedRows = await bob.client.get<{
+    items: Array<{ id: string; body: string | null; attachments: unknown[]; envelopes: Array<{ ciphertext: string }> }>;
+  }>(`/api/conversations/${conversationId}/messages?limit=10`);
+  const fileRow = storedRows.items.find((item) => item.id === fileSent.message.id);
+  const storedJson = JSON.stringify(fileRow);
+  check('the message row carries the attachment id only', /"id"/.test(storedJson) && !storedJson.includes('secret-plan'), storedJson.slice(0, 160));
+  check('the stored row has no readable text', fileRow?.body === null, fileRow?.body);
+
+  const openedPayload = parseContent(
+    await bob.engine.decryptEnvelope({
+      messageId: fileSent.message.id,
+      conversationId,
+      senderUserId: alice.userId,
+      envelope: { deviceId: bob.deviceId, scheme: 'olm-v1', ciphertext: fileRow!.envelopes[0]!.ciphertext },
+      mine: false,
+    }),
+  );
+  check('bob decrypted the payload and found the file descriptor', openedPayload.files.length === 1, openedPayload.files);
+  check('the real name travelled inside the ciphertext', openedPayload.files[0]?.name === 'secret-plan.txt', openedPayload.files[0]?.name);
+  check('the text came through with the file', openedPayload.text.startsWith('مرفق مشفّر'), openedPayload.text);
+
+  // Bob downloads the stored bytes with a media token and opens them with the key from the payload.
+  const media = await bob.client.post<{ token: string }>('/api/auth/media-token');
+  const ciphertextResponse = await fetch(`${BASE}/api/files/${uploaded.attachment.id}?token=${media.token}`);
+  check('the stored bytes download with a media token', ciphertextResponse.ok, ciphertextResponse.status);
+  const ciphertextBytes = new Uint8Array(await ciphertextResponse.arrayBuffer());
+  check(
+    'the stored bytes are not the plaintext',
+    Buffer.from(ciphertextBytes).indexOf(Buffer.from(fileBytes)) === -1,
+    ciphertextBytes.slice(0, 16).join(','),
+  );
+
+  const openedBlob = await openAsBlob(
+    `${BASE}/api/files/${uploaded.attachment.id}?token=${media.token}`,
+    openedPayload.files[0]!,
+  );
+  const openedBytes = new Uint8Array(await openedBlob.arrayBuffer());
+  check('bob opened the file and got the exact bytes', Buffer.from(openedBytes).equals(Buffer.from(fileBytes)), openedBytes.byteLength);
+  check('the blob carries the real MIME type', openedBlob.type === 'text/plain', openedBlob.type);
+
+  let wrongKeyRejected = false;
+  try {
+    // A different file's key must not open this ciphertext: GCM authenticates, so it fails instead
+    // of returning garbage that would look like a corrupted download.
+    const otherSeal = await sealFileForUpload(new Blob([new Uint8Array([1, 2, 3])]), 'other.bin', 'application/octet-stream');
+    await openBytes(await (await fetch(`${BASE}/api/files/${uploaded.attachment.id}?token=${media.token}`)).arrayBuffer(), otherSeal.describe('wrong'));
+  } catch {
+    wrongKeyRejected = true;
+  }
+  check('a key that does not belong to the file cannot open it', wrongKeyRejected);
+
+  // A readable file inside an encrypted conversation is refused outright.
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==',
+    'base64',
+  );
+  const plainForm = new FormData();
+  plainForm.append('file', new Blob([new Uint8Array(png)], { type: 'image/png' }), 'photo.png');
+  const plainUpload = await alice.client.upload<{ attachment: { id: string; isEncrypted: boolean } }>('/api/files', plainForm);
+  check('a readable upload is not marked encrypted', plainUpload.attachment.isEncrypted === false, plainUpload.attachment);
+  let mixRefused = false;
+  let mixMessage = '';
+  try {
+    await alice.client.post(`/api/conversations/${conversationId}/messages`, {
+      clientMessageId: `live-${Date.now()}-mix`,
+      body: '',
+      encryptionScheme: 'olm-v1',
+      ciphertext: 'AAAA',
+      attachmentIds: [plainUpload.attachment.id],
+    });
+  } catch (error) {
+    mixRefused = true;
+    mixMessage = error instanceof Error ? error.message : String(error);
+  }
+  check(
+    'a readable file is refused inside an encrypted conversation',
+    mixRefused && mixMessage.includes('encrypted_conversation_requires_encrypted_files'),
+    mixMessage,
+  );
+
   await secondClient.post('/api/auth/logout').catch(() => {});
 
   console.log(`\n${failures.length === 0 ? 'PASS' : 'FAIL'} — ${passed} checks passed, ${failures.length} failed`);

@@ -156,6 +156,22 @@ const strings: Dict = {
     ar: 'المرفقات غير مشفّرة طرفياً بعد، لذلك تُعطَّل في المحادثات المشفّرة.',
     en: 'Attachments are not end-to-end encrypted yet, so they are disabled in encrypted chats.',
   },
+  attachmentsEncrypted: {
+    ar: 'المرفقات تُشفَّر في متصفحك قبل الرفع — الخادم يخزّن بايتات لا يقرأها.',
+    en: 'Attachments are encrypted in your browser before upload — the server stores bytes it cannot read.',
+  },
+  attachmentLocked: {
+    ar: 'مرفق مشفّر — لا يمكن فتحه قبل قراءة الرسالة على هذا الجهاز.',
+    en: 'Encrypted attachment — it cannot be opened before this device reads the message.',
+  },
+  attachmentOpenFailed: {
+    ar: 'تعذّر فتح المرفق: المفتاح لا يطابق هذه البايتات (ربما تغيّرت بعد الرفع).',
+    en: 'Could not open the attachment: the key does not match these bytes (they may have changed after upload).',
+  },
+  openEncryptedAttachment: {
+    ar: 'فتح المرفق المشفّر',
+    en: 'Open encrypted attachment',
+  },
 };
 
 let currentLocale: Locale = 'ar';

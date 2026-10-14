@@ -3,7 +3,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '@/lib/api';
 import { realtime, newClientMessageId, newRequestId } from '@/lib/realtime';
-import { AttachmentView } from '@/components/media';
+import { AttachmentView, EncryptedAttachmentView } from '@/components/media';
+import {
+  descriptorFor,
+  encodeContent,
+  parseContent,
+  sealFileForUpload,
+  type EncryptedFileDescriptor,
+} from '@/lib/e2ee/content';
 import { Avatar, Badge, Button, EmptyState, Spinner, formatTime } from '@/components/ui';
 import { useT } from '@/lib/i18n';
 import type { E2eeEngine } from '@/lib/e2ee/engine';
@@ -37,7 +44,18 @@ export interface ChatMessage {
   deletedAt: string | null;
   state: 'sent' | 'delivered' | 'read';
   sender: { id: string; username: string; displayName: string; avatarUrl: string | null } | null;
-  attachments: Array<{ id: string; url: string; mimeType: string; fileName: string; sizeBytes: number; width: number | null; height: number | null; durationMs: number | null }>;
+  attachments: Array<{
+    id: string;
+    url: string;
+    mimeType: string;
+    fileName: string;
+    sizeBytes: number;
+    width: number | null;
+    height: number | null;
+    durationMs: number | null;
+    /** Ciphertext stored for an encrypted conversation: no readable name or type in the row. */
+    isEncrypted: boolean;
+  }>;
   replyTo: { id: string; body: string | null; senderUsername: string | null } | null;
   /** 'none' for plaintext; a scheme name when this row is ciphertext for this device. */
   encryptionScheme: 'none' | 'libsignal-v1' | 'olm-v1';
@@ -164,6 +182,12 @@ export function MessageThread({
     <div className="scroll-area flex-1 space-y-2 p-3">
       {messages.map((message) => {
         const mine = message.sender?.id === viewerId;
+        /**
+         * The readable body of an encrypted message, when this device has it. Undefined (rather than
+         * an empty string) keeps "still decrypting", "locked" and "genuinely empty text" apart:
+         * only a decrypted payload carries the file descriptors that make attachments openable.
+         */
+        const decrypted = message.encryptionScheme !== 'none' ? plaintext?.get(message.id) : undefined;
         if (message.type === 'system') {
           return (
             <p key={message.id} className="muted text-center text-xs">
@@ -196,7 +220,7 @@ export function MessageThread({
                   <>
                     {message.encryptionScheme !== 'none' ? (
                       <EncryptedBody
-                        text={plaintext?.get(message.id) ?? null}
+                        text={decrypted ? parseContent(decrypted).text : null}
                         state={lockState?.get(message.id) ?? 'pending'}
                       />
                     ) : (
@@ -204,9 +228,19 @@ export function MessageThread({
                     )}
                     {message.attachments.length > 0 && (
                       <div className="flex flex-wrap gap-2 pt-1">
-                        {message.attachments.map((attachment) => (
-                          <AttachmentView key={attachment.id} attachment={attachment} />
-                        ))}
+                        {message.attachments.map((attachment) =>
+                          attachment.isEncrypted ? (
+                            <EncryptedAttachmentView
+                              key={attachment.id}
+                              attachment={attachment}
+                              descriptor={
+                                decrypted ? descriptorFor(parseContent(decrypted).files, attachment.id) : null
+                              }
+                            />
+                          ) : (
+                            <AttachmentView key={attachment.id} attachment={attachment} />
+                          ),
+                        )}
                       </div>
                     )}
                   </>
@@ -292,11 +326,19 @@ export function Composer({
   engine?: E2eeEngine | null;
 }) {
   const tr = useT();
-  const attachmentsLocked = encrypted;
   const [staleDeviceNotice, setStaleDeviceNotice] = useState(0);
   const [text, setText] = useState('');
   const [uploading, setUploading] = useState(false);
-  const [attachments, setAttachments] = useState<ChatMessage['attachments']>([]);
+  /**
+   * Attachments wait here between upload and send.
+   *
+   * In an encrypted conversation the descriptor (key, nonce, real name and type) is held next to the
+   * server row: the row deliberately says nothing about the file, so the descriptor is the only way
+   * the sender's own client can describe it in the outgoing payload.
+   */
+  const [attachments, setAttachments] = useState<
+    Array<{ attachment: ChatMessage['attachments'][number]; descriptor: EncryptedFileDescriptor | null }>
+  >([]);
   const [recording, setRecording] = useState(false);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const fileInput = useRef<HTMLInputElement | null>(null);
@@ -317,21 +359,29 @@ export function Composer({
     if (!body && attachments.length === 0) return;
 
     // Encryption happens before anything reaches the network: the server only ever receives
-    // envelopes. Attachments are NOT encrypted yet, so sending them inside an encrypted
-    // conversation would put readable media next to ciphertext — refused instead of faked.
+    // envelopes and ciphertext. Files are sealed in this browser as they are uploaded, so the keys
+    // that open them travel inside the same encrypted payload as the text.
     if (encrypted) {
-      if (attachments.length > 0) {
-        alert('المرفقات غير مشفّرة بعد ولم تُرسل. أرسل النص مشفّراً أو أزل المرفقات.');
-        return;
-      }
-      if (!body) return;
       if (!engine) {
         alert(tr('e2eeBlocked'));
         return;
       }
+      // Every attachment must have been uploaded as ciphertext. A file that was uploaded earlier in
+      // plaintext mode (the toggle can flip mid-thread) has no key to send, so it is refused here
+      // rather than dropped into an encrypted conversation unreadable-but-readable.
+      if (attachments.length > 0 && attachments.some((entry) => entry.descriptor === null)) {
+        alert(tr('attachmentsNotEncrypted'));
+        return;
+      }
       const clientMessageId = newClientMessageId();
-      const plaintextBody = body;
+      const descriptors = attachments
+        .map((entry) => entry.descriptor)
+        .filter((descriptor): descriptor is EncryptedFileDescriptor => descriptor !== null);
+      // The payload the recipient decrypts: the text plus how to open this message's files.
+      const plaintextBody = encodeContent(body, descriptors);
+      const attachmentIds = attachments.map((entry) => entry.attachment.id);
       setText('');
+      setAttachments([]);
       onCancelReply();
       try {
         const status = await engine.conversationStatus(conversationId);
@@ -358,6 +408,9 @@ export function Composer({
             replyToId: replyingTo?.id ?? null,
             encryptionScheme: 'olm-v1',
             envelopes,
+            // The ids let the recipient's client match descriptors to stored ciphertext. They reveal
+            // which rows belong together, never what is in them.
+            attachmentIds,
           },
         );
         // This device keeps its own plaintext locally, so the thread renders immediately and
@@ -365,7 +418,9 @@ export function Composer({
         await engine.rememberSent({ messageId: result.message.id, conversationId, body: plaintextBody });
         onSent(result.message, result.duplicated);
       } catch (err) {
-        setText(plaintextBody);
+        // Nothing was stored, so the user's work comes back: text and the uploaded ciphertext.
+        setText(body);
+        setAttachments(attachments);
         console.error('encrypted send failed', err);
         alert('تعذّر إرسال الرسالة المشفّرة.');
       }
@@ -373,7 +428,7 @@ export function Composer({
     }
 
     const clientMessageId = newClientMessageId();
-    const attachmentIds = attachments.map((attachment) => attachment.id);
+    const attachmentIds = attachments.map((entry) => entry.attachment.id);
     setText('');
     setAttachments([]);
     onCancelReply();
@@ -411,10 +466,19 @@ export function Composer({
     setUploading(true);
     try {
       for (const file of Array.from(files).slice(0, 5)) {
+        // In an encrypted conversation the bytes are sealed here, before they leave the browser: the
+        // upload carries ciphertext and a neutral name, and the real name/type/key stay local until
+        // they are sent inside the encrypted payload.
+        if (encrypted) {
+          const { form, describe } = await sealFileForUpload(file, file.name, file.type || 'application/octet-stream');
+          const result = await api.upload<{ attachment: ChatMessage['attachments'][number] }>('/api/files', form);
+          setAttachments((current) => [...current, { attachment: result.attachment, descriptor: describe(result.attachment.id) }]);
+          continue;
+        }
         const form = new FormData();
         form.append('file', file);
         const result = await api.upload<{ attachment: ChatMessage['attachments'][number] }>('/api/files', form);
-        setAttachments((current) => [...current, result.attachment]);
+        setAttachments((current) => [...current, { attachment: result.attachment, descriptor: null }]);
       }
     } catch (err) {
       console.error('upload failed', err);
@@ -439,12 +503,21 @@ export function Composer({
       recorder.onstop = async () => {
         stream.getTracks().forEach((track) => track.stop());
         const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
-        const form = new FormData();
-        form.append('file', new File([blob], `voice-${Date.now()}.webm`, { type: blob.type }));
+        const voiceName = `voice-${Date.now()}.webm`;
+        const voice = new File([blob], voiceName, { type: blob.type });
         setUploading(true);
         try {
+          // A voice note is a file like any other: inside an encrypted conversation it is sealed
+          // first, so the recording never reaches the server in a readable form.
+          const { form, describe } = encrypted
+            ? await sealFileForUpload(voice, voiceName, voice.type || 'audio/webm')
+            : { form: new FormData(), describe: null };
+          if (!encrypted) form.append('file', voice);
           const result = await api.upload<{ attachment: ChatMessage['attachments'][number] }>('/api/files', form);
-          setAttachments((current) => [...current, result.attachment]);
+          setAttachments((current) => [
+            ...current,
+            { attachment: result.attachment, descriptor: describe ? describe(result.attachment.id) : null },
+          ]);
         } finally {
           setUploading(false);
         }
@@ -462,7 +535,7 @@ export function Composer({
       {encrypted && (
         <p className="muted flex items-center gap-1 text-[11px]">
           <span aria-hidden>🔒</span>
-          {tr('encrypted')} · {tr('attachmentsNotEncrypted')}
+          {tr('encrypted')} · {encrypted ? tr('attachmentsEncrypted') : tr('attachmentsNotEncrypted')}
         </p>
       )}
       {staleDeviceNotice > 0 && (
@@ -482,10 +555,14 @@ export function Composer({
       )}
       {attachments.length > 0 && (
         <div className="flex flex-wrap gap-2">
-          {attachments.map((attachment) => (
-            <span key={attachment.id} className="pill">
-              {attachment.fileName}
-              <button type="button" onClick={() => setAttachments((current) => current.filter((a) => a.id !== attachment.id))}>
+          {attachments.map((entry) => (
+            <span key={entry.attachment.id} className="pill">
+              {entry.descriptor ? `🔒 ${entry.descriptor.name}` : entry.attachment.fileName}
+              <button
+                type="button"
+                aria-label={`remove ${entry.attachment.fileName}`}
+                onClick={() => setAttachments((current) => current.filter((item) => item.attachment.id !== entry.attachment.id))}
+              >
                 ✕
               </button>
             </span>
@@ -523,9 +600,8 @@ export function Composer({
           type="button"
           variant="ghost"
           onClick={() => fileInput.current?.click()}
-          disabled={uploading || attachmentsLocked}
+          disabled={uploading}
           aria-label={tr('uploadFile')}
-          title={attachmentsLocked ? tr('attachmentsNotEncrypted') : undefined}
         >
           {uploading ? <Spinner size={14} /> : '📎'}
         </Button>
@@ -533,9 +609,7 @@ export function Composer({
           type="button"
           variant="ghost"
           onClick={() => void toggleRecording()}
-          disabled={attachmentsLocked}
           aria-label={recording ? tr('stopRecording') : tr('startRecording')}
-          title={attachmentsLocked ? tr('attachmentsNotEncrypted') : undefined}
           style={recording ? { color: 'var(--danger)' } : undefined}
         >
           {recording ? '⏹' : '🎙'}

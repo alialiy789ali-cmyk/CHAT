@@ -202,11 +202,21 @@ export class AuthService {
     const installKey = device?.key ?? null;
 
     if (installKey) {
-      const existing = await this.deps.repos.sessions.findDeviceByInstallKey(user.id, installKey);
-      if (existing) {
-        await this.deps.repos.sessions.touchDevice(existing.id);
-        if (existing.name !== name) await this.deps.repos.sessions.renameDevice(existing.id, name);
-        return existing;
+      // Revoked rows are looked up too: the install key of a removed device is still on its row, and
+      // forgetting that would make the next sign-in from that install collide with the unique index.
+      const known = await this.deps.repos.sessions.findDeviceByInstallKey(user.id, installKey, { includeRevoked: true });
+      if (known?.revoked_at) {
+        const revived = await this.deps.repos.sessions.reviveDevice(known.id, name);
+        this.deps.logger.info(
+          { userId: user.id, deviceId: revived.id },
+          'revoked device signed in again and was re-activated (keys must be republished)',
+        );
+        return revived;
+      }
+      if (known) {
+        await this.deps.repos.sessions.touchDevice(known.id);
+        if (known.name !== name) await this.deps.repos.sessions.renameDevice(known.id, name);
+        return known;
       }
       try {
         return await this.deps.repos.sessions.createDevice({ userId: user.id, name, platform, installKey });
